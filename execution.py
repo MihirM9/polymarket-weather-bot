@@ -1,0 +1,271 @@
+"""
+execution.py — Module 4: Execution, Logging & Reporting (v3)
+=============================================================
+v3 changes:
+  - Integrates with PositionTracker for real fill tracking.
+  - OrderExecutor returns OpenOrder objects instead of bare fill prices.
+  - execute_batch feeds actual order IDs to the tracker.
+  - Dry-run mode creates synthetic OpenOrders with immediate fills.
+
+Ref: Gemini stress test Fix #1 (fill tracking & exposure management).
+"""
+
+import asyncio
+import csv
+import logging
+import uuid
+from datetime import datetime, date, timezone
+from pathlib import Path
+from typing import List, Optional
+
+from config import cfg
+from decision_engine import TradeSignal
+from position_tracker import OpenOrder, OrderStatus, PositionTracker
+
+logger = logging.getLogger(__name__)
+
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+TRADE_LOG = LOG_DIR / "trades.csv"
+SCAN_LOG = LOG_DIR / "scans.csv"
+
+
+# ── Telegram Alerter ────────────────────────────────────────────────
+
+class TelegramAlerter:
+    """Sends alerts via Telegram bot API."""
+
+    def __init__(self):
+        self.token = cfg.telegram_token
+        self.chat_id = cfg.telegram_chat_id
+        self.enabled = bool(self.token and self.chat_id)
+        if not self.enabled:
+            logger.info("Telegram alerting disabled (no token/chat_id)")
+
+    async def send(self, message: str):
+        if not self.enabled:
+            return
+        import aiohttp
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Telegram send failed: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Telegram exception: {e}")
+
+    async def trade_alert(self, signal: TradeSignal, order: OpenOrder, dry_run: bool):
+        mode = "DRY-RUN" if dry_run else "LIVE"
+        fill_info = (
+            f"${order.filled_size_usd:.2f} @ {order.avg_fill_price:.3f}"
+            if order.status == OrderStatus.FILLED
+            else f"pending (order {order.order_id[:12]})"
+        )
+        msg = (
+            f"*{mode}* | *{signal.side}* | {signal.city} {signal.market_date}\n"
+            f"Bucket: {signal.outcome_label}\n"
+            f"p_true: {signal.p_true:.3f} | mkt: {signal.market_price:.3f}\n"
+            f"EV: {signal.ev:.3f} | Edge: {signal.edge:.3f}\n"
+            f"Size: ${signal.position_size_usd:.2f} @ limit {signal.price_limit:.3f}\n"
+            f"Fill: {fill_info}\n"
+            f"_{signal.rationale}_"
+        )
+        await self.send(msg)
+
+    async def daily_summary(self, daily_pnl: float, trade_count: int,
+                             tracker: PositionTracker):
+        msg = (
+            f"*Daily Summary* ({date.today().isoformat()})\n"
+            f"PnL: ${daily_pnl:+.2f}\n"
+            f"Trades: {trade_count}\n"
+            f"{tracker.get_exposure_summary()}\n"
+            f"Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}"
+        )
+        await self.send(msg)
+
+    async def fill_update_alert(self, order: OpenOrder):
+        msg = (
+            f"*Fill Update*: {order.side} {order.outcome_label}\n"
+            f"Status: {order.status.value}\n"
+            f"Filled: ${order.filled_size_usd:.2f} / ${order.intended_size_usd:.2f}\n"
+            f"Avg price: {order.avg_fill_price:.3f}"
+        )
+        await self.send(msg)
+
+    async def error_alert(self, error_msg: str):
+        await self.send(f"*Error*: {error_msg}")
+
+    async def shutdown_alert(self, reason: str):
+        await self.send(f"*Bot Shutdown*: {reason}")
+
+
+# ── Trade Logger ────────────────────────────────────────────────────
+
+class TradeLogger:
+    """CSV trade logger — v3: includes order_id and fill status columns."""
+
+    def __init__(self):
+        if not TRADE_LOG.exists():
+            with open(TRADE_LOG, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "timestamp", "mode", "order_id", "city", "market_date",
+                    "outcome", "side", "p_true", "market_price", "ev", "edge",
+                    "kelly_frac", "intended_usd", "price_limit",
+                    "fill_status", "filled_usd", "avg_fill_price",
+                    "token_id", "market_id", "rationale",
+                ])
+
+    def log_trade(self, signal: TradeSignal, order: OpenOrder, dry_run: bool):
+        with open(TRADE_LOG, "a", newline="") as f:
+            csv.writer(f).writerow([
+                datetime.now(timezone.utc).isoformat(),
+                "dry-run" if dry_run else "live",
+                order.order_id,
+                signal.city,
+                signal.market_date.isoformat(),
+                signal.outcome_label,
+                signal.side,
+                f"{signal.p_true:.4f}",
+                f"{signal.market_price:.4f}",
+                f"{signal.ev:.4f}",
+                f"{signal.edge:.4f}",
+                f"{signal.kelly_fraction:.4f}",
+                f"{signal.position_size_usd:.2f}",
+                f"{signal.price_limit:.4f}",
+                order.status.value,
+                f"{order.filled_size_usd:.2f}",
+                f"{order.avg_fill_price:.4f}",
+                signal.token_id,
+                signal.market_id,
+                signal.rationale,
+            ])
+
+    def log_scan(self, num_markets: int, num_matches: int, num_signals: int):
+        if not SCAN_LOG.exists():
+            with open(SCAN_LOG, "w", newline="") as f:
+                csv.writer(f).writerow(["timestamp", "markets_found", "matches", "signals"])
+        with open(SCAN_LOG, "a", newline="") as f:
+            csv.writer(f).writerow([
+                datetime.now(timezone.utc).isoformat(),
+                num_markets, num_matches, num_signals,
+            ])
+
+
+# ── Order Executor (v3: fill-tracking aware) ──────────────────────
+
+class OrderExecutor:
+    """
+    Places orders on Polymarket and registers them with the PositionTracker.
+    v3: Returns OpenOrder objects, tracks order_ids, supports fill polling.
+    """
+
+    def __init__(self, tracker: PositionTracker):
+        self.client = None
+        self.dry_run = not cfg.is_live
+        self.tracker = tracker
+
+        if cfg.is_live:
+            try:
+                from py_clob_client.client import ClobClient
+
+                self.client = ClobClient(
+                    host=cfg.polymarket_host,
+                    key=cfg.private_key,
+                    chain_id=cfg.chain_id,
+                    funder=cfg.funder if cfg.funder else None,
+                )
+                self.client.set_api_creds(self.client.create_or_derive_api_creds())
+                tracker.set_clob_client(self.client)
+                logger.info("ClobClient initialized in LIVE mode")
+            except ImportError:
+                logger.error("py-clob-client not installed — falling back to dry-run")
+                self.dry_run = True
+            except Exception as e:
+                logger.error(f"ClobClient init failed: {e} — falling back to dry-run")
+                self.dry_run = True
+        else:
+            logger.info("OrderExecutor running in DRY-RUN mode")
+
+    def _build_open_order(self, signal: TradeSignal, order_id: str) -> OpenOrder:
+        return OpenOrder(
+            order_id=order_id,
+            token_id=signal.token_id,
+            market_id=signal.market_id,
+            city=signal.city,
+            market_date=signal.market_date,
+            outcome_label=signal.outcome_label,
+            side=signal.side,
+            intended_size_usd=signal.position_size_usd,
+            limit_price=signal.price_limit,
+            submitted_at=datetime.now(timezone.utc),
+        )
+
+    async def execute_signal(self, signal: TradeSignal) -> Optional[OpenOrder]:
+        """Execute a single trade signal. Returns OpenOrder registered with tracker."""
+        if self.dry_run:
+            order_id = f"dry-{uuid.uuid4().hex[:12]}"
+            order = self._build_open_order(signal, order_id)
+            self.tracker.register_dry_run_fill(order)
+            logger.info(
+                f"[DRY-RUN] {signal.side} {signal.outcome_label} "
+                f"${signal.position_size_usd:.2f} @ {signal.price_limit:.3f} "
+                f"| {signal.city} {signal.market_date} (id={order_id})"
+            )
+            return order
+
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import BUY, SELL
+
+            side = BUY if signal.side == "BUY" else SELL
+            price = signal.price_limit
+            size = signal.position_size_usd / price if price > 0 else 0
+
+            order_args = OrderArgs(
+                token_id=signal.token_id,
+                price=price,
+                size=size,
+                side=side,
+            )
+
+            signed_order = self.client.create_and_sign_order(order_args)
+            resp = self.client.post_order(signed_order, OrderType.GTC)
+
+            if resp and resp.get("success"):
+                order_id = resp.get("orderID", resp.get("order_id",
+                                    f"live-{uuid.uuid4().hex[:12]}"))
+                order = self._build_open_order(signal, order_id)
+                order.status = OrderStatus.PENDING
+                self.tracker.register_order(order)
+                logger.info(
+                    f"[LIVE] Order submitted: {signal.side} {signal.outcome_label} "
+                    f"${signal.position_size_usd:.2f} @ {price:.3f} "
+                    f"| {signal.city} {signal.market_date} (id={order_id})"
+                )
+                return order
+            else:
+                logger.warning(f"Order rejected: {resp}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Order execution error: {e}")
+            return None
+
+    async def execute_batch(
+        self,
+        signals: List[TradeSignal],
+        telegram: TelegramAlerter,
+        trade_logger: TradeLogger,
+    ) -> int:
+        """Execute all signals, register with tracker, log, and alert."""
+        executed = 0
+        for signal in signals:
+            order = await self.execute_signal(signal)
+            if order:
+                trade_logger.log_trade(signal, order, self.dry_run)
+                await telegram.trade_alert(signal, order, self.dry_run)
+                executed += 1
+            await asyncio.sleep(0.5)
+        return executed

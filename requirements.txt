@@ -1,0 +1,6 @@
+# Polymarket Weather Trading Bot — Dependencies
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+py-clob-client>=0.2.0
+python-telegram-bot>=20.0
+requests>=2.31.0

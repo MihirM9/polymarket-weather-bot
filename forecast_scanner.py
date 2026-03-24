@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from api_utils import fetch_with_retry
 from config import cfg
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,17 @@ def bucket_probabilities(
     return probs
 
 
+def _has_negation_before(text: str, keyword: str) -> bool:
+    """Check if keyword in text is preceded by negation within ~30 chars."""
+    NEGATIONS = {"no ", "not ", "no longer ", "without ", "unlikely ", "not expecting "}
+    idx = text.find(keyword)
+    if idx < 0:
+        return False
+    # Check the 30 characters before the keyword for negation
+    prefix = text[max(0, idx - 30):idx].lower()
+    return any(neg in prefix for neg in NEGATIONS)
+
+
 def _detect_weather_regime(short_forecast: str) -> Tuple[str, float]:
     """
     Detect weather regime from NWS detailed forecast text.
@@ -91,24 +103,39 @@ def _detect_weather_regime(short_forecast: str) -> Tuple[str, float]:
     - Tropical systems: highly unpredictable temperature impacts
     - Thunderstorms: convective cooling can drop temps 10°F+ suddenly
     - Clear/stable: high confidence, no sigma inflation needed
+
+    Negation-aware: phrases like "No hurricane expected" won't trigger
+    the tropical regime. Checks for negation words within ~30 chars
+    before each keyword match.
     """
     text = short_forecast.lower() if short_forecast else ""
 
-    # Most volatile → least volatile
-    if any(w in text for w in ["hurricane", "tropical storm", "tropical depression"]):
+    # Most volatile → least volatile (negation-aware — §4.2)
+    if any(w in text and not _has_negation_before(text, w) for w in ["hurricane", "tropical storm", "tropical depression"]):
         return ("tropical", 2.5)
-    if any(w in text for w in ["severe thunderstorm", "tornado", "severe"]):
+    if any(w in text and not _has_negation_before(text, w) for w in ["severe thunderstorm", "tornado", "severe"]):
         return ("severe", 2.0)
-    if any(w in text for w in ["thunderstorm", "tstorm", "t-storm"]):
+    if any(w in text and not _has_negation_before(text, w) for w in ["thunderstorm", "tstorm", "t-storm"]):
         return ("convective", 1.5)
-    if any(w in text for w in ["cold front", "warm front", "frontal", "front passage"]):
+    if any(w in text and not _has_negation_before(text, w) for w in ["cold front", "warm front", "frontal", "front passage"]):
         return ("frontal", 1.4)
-    if any(w in text for w in ["wind advisory", "high wind"]):
+    if any(w in text and not _has_negation_before(text, w) for w in ["wind advisory", "high wind"]):
         return ("windy", 1.2)
-    if any(w in text for w in ["fog", "patchy fog"]):
+    if any(w in text and not _has_negation_before(text, w) for w in ["fog", "patchy fog"]):
         return ("fog", 1.1)  # minimal temp impact
     if any(w in text for w in ["sunny", "clear", "mostly sunny", "mostly clear"]):
-        return ("stable", 0.9)  # slightly tighter than default
+        return ("stable", 0.9)  # slightly tighter than default (no negation check needed)
+
+    # Log if any weather keywords were present but all negated
+    _volatile_keywords = [
+        "hurricane", "tropical storm", "tropical depression",
+        "severe thunderstorm", "tornado", "severe",
+        "thunderstorm", "tstorm", "t-storm",
+        "cold front", "warm front", "frontal", "front passage",
+        "wind advisory", "high wind", "fog", "patchy fog",
+    ]
+    if any(w in text and _has_negation_before(text, w) for w in _volatile_keywords):
+        logger.debug(f"Negated weather keyword detected in: {text[:80]}")
 
     return ("normal", 1.0)
 
@@ -169,19 +196,17 @@ class ForecastScanner:
 
         lat, lon = coords
         url = f"{NWS_BASE}/points/{lat:.4f},{lon:.4f}"
+        data = await fetch_with_retry(session, url, headers=NWS_HEADERS, label=f"NWS-points-{city}")
+        if not data:
+            return None
         try:
-            async with session.get(url, headers=NWS_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.error(f"NWS points error {resp.status} for {city}")
-                    return None
-                data = await resp.json()
-                props = data["properties"]
-                office = props["gridId"]
-                gx, gy = props["gridX"], props["gridY"]
-                self._grid_cache[city] = (office, gx, gy)
-                return (office, gx, gy)
-        except Exception as e:
-            logger.error(f"NWS points exception for {city}: {e}")
+            props = data["properties"]
+            office = props["gridId"]
+            gx, gy = props["gridX"], props["gridY"]
+            self._grid_cache[city] = (office, gx, gy)
+            return (office, gx, gy)
+        except (KeyError, TypeError) as e:
+            logger.error(f"NWS points parse error for {city}: {e}")
             return None
 
     async def _get_forecast(self, session: aiohttp.ClientSession, city: str) -> List[CityForecast]:
@@ -192,14 +217,8 @@ class ForecastScanner:
 
         office, gx, gy = grid
         url = f"{NWS_BASE}/gridpoints/{office}/{gx},{gy}/forecast"
-        try:
-            async with session.get(url, headers=NWS_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.error(f"NWS forecast error {resp.status} for {city}")
-                    return []
-                data = await resp.json()
-        except Exception as e:
-            logger.error(f"NWS forecast exception for {city}: {e}")
+        data = await fetch_with_retry(session, url, headers=NWS_HEADERS, label=f"NWS-forecast-{city}")
+        if not data:
             return []
 
         periods = data.get("properties", {}).get("periods", [])

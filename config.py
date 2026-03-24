@@ -33,6 +33,7 @@ class Config:
     kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.15"))
     min_ev_threshold: float = float(os.getenv("MIN_EV_THRESHOLD", "0.03"))
     min_edge: float = float(os.getenv("MIN_EDGE", "0.08"))
+    fee_rate: float = float(os.getenv("FEE_RATE", "0.02"))
     scan_interval_sec: int = int(os.getenv("SCAN_INTERVAL_SEC", "120"))
 
     # --- Mode ---

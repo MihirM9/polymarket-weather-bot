@@ -21,6 +21,8 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from api_utils import fetch_with_retry
+
 logger = logging.getLogger(__name__)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
@@ -135,11 +137,16 @@ def _extract_date(question: str) -> Optional[date]:
 class PolymarketParser:
     """Discovers and parses active temperature ladder markets from the Gamma API."""
 
+    def __init__(self) -> None:
+        self._parse_stats: Dict[str, int] = {"total": 0, "success": 0, "failed": 0}
+        self._failed_labels: List[str] = []  # track unique failed labels for debugging
+
     async def fetch_temperature_markets(self) -> List[TemperatureMarket]:
         """
         Query Gamma API for active temperature markets.
         Ref: Core bot rules — GET /markets?active=true&closed=false, filter "temperature".
         """
+        self._parse_stats = {"total": 0, "success": 0, "failed": 0}
         markets: List[TemperatureMarket] = []
         offset = 0
         limit = 100  # Gamma API page size
@@ -150,16 +157,9 @@ class PolymarketParser:
                     f"{GAMMA_BASE}/markets"
                     f"?active=true&closed=false&limit={limit}&offset={offset}"
                 )
-                try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                        if resp.status != 200:
-                            logger.error(f"Gamma API error {resp.status}")
-                            break
-                        data = await resp.json()
-                except Exception as e:
-                    logger.error(f"Gamma API exception: {e}")
-                    break
-
+                data = await fetch_with_retry(
+                    session, url, timeout_sec=20.0, label="Gamma-markets"
+                )
                 if not data:
                     break
 
@@ -200,6 +200,14 @@ class PolymarketParser:
                             token_id = tok.get("token_id", "")
                             price = float(tok.get("price", 0) or 0)
                             lo, hi = _parse_bucket(outcome_label)
+                            self._parse_stats["total"] += 1
+                            if lo is None and hi is None:
+                                self._parse_stats["failed"] += 1
+                                if outcome_label not in self._failed_labels:
+                                    self._failed_labels.append(outcome_label)
+                                    logger.warning(f"Unparsed bucket label: '{outcome_label}'")
+                            else:
+                                self._parse_stats["success"] += 1
                             mkt.outcomes.append(MarketOutcome(
                                 outcome_label=outcome_label,
                                 token_id=token_id,
@@ -216,6 +224,14 @@ class PolymarketParser:
                             token_id = clob_ids[idx] if idx < len(clob_ids) else ""
                             price = float(outcome_prices[idx]) if idx < len(outcome_prices) else 0.0
                             lo, hi = _parse_bucket(label)
+                            self._parse_stats["total"] += 1
+                            if lo is None and hi is None:
+                                self._parse_stats["failed"] += 1
+                                if label not in self._failed_labels:
+                                    self._failed_labels.append(label)
+                                    logger.warning(f"Unparsed bucket label: '{label}'")
+                            else:
+                                self._parse_stats["success"] += 1
                             mkt.outcomes.append(MarketOutcome(
                                 outcome_label=label,
                                 token_id=token_id,
@@ -231,6 +247,18 @@ class PolymarketParser:
                 if len(data) < limit:
                     break
                 offset += limit
+
+        if self._parse_stats["total"] > 0:
+            fail_rate = self._parse_stats["failed"] / self._parse_stats["total"] * 100
+            logger.info(
+                f"Bucket parse stats: {self._parse_stats['success']}/{self._parse_stats['total']} "
+                f"successful ({fail_rate:.1f}% failure rate)"
+            )
+            if fail_rate > 20:
+                logger.warning(
+                    f"High bucket parse failure rate ({fail_rate:.1f}%) — "
+                    f"check regex patterns. Failed labels: {self._failed_labels[:5]}"
+                )
 
         logger.info(f"Parsed {len(markets)} active temperature markets")
         return markets

@@ -87,12 +87,19 @@ class PositionTracker:
     # Cancel unfilled orders after this many seconds (default: 10 min)
     ORDER_TTL_SEC = int(600)
 
+    # Number of scan cycles to suppress re-ordering after a stale cancel (§7.1)
+    # 3 cycles × 2 min = 6 min cooldown prevents infinite cancel-replace loops
+    COOLDOWN_CYCLES = 3
+
     def __init__(self):
         self._orders: Dict[str, OpenOrder] = {}   # order_id → OpenOrder
         self._today: Optional[date] = None
         self._daily_realized: float = 0.0
         self._daily_pending: float = 0.0
         self._clob_client = None
+        # Cooldown tracker: "market_id:outcome_label" → remaining cycles (§7.1)
+        # Prevents cancel-replace loops by suppressing re-orders after stale cancels
+        self._cancel_cooldowns: Dict[str, int] = {}
 
         self._init_log()
 
@@ -131,6 +138,7 @@ class PositionTracker:
             }
             self._daily_realized = 0.0
             self._daily_pending = 0.0
+            self._cancel_cooldowns.clear()
             self._today = today
 
     def set_clob_client(self, client):
@@ -165,6 +173,7 @@ class PositionTracker:
         has accurate exposure numbers before evaluating new trades.
         """
         self._reset_daily_if_needed()
+        self.tick_cooldowns()
 
         if not self._clob_client:
             return 0
@@ -240,10 +249,45 @@ class PositionTracker:
                     order.status = OrderStatus.CANCELLED
                     self._log_order(order)
                     cancelled += 1
-                    logger.info(f"Cancelled stale order {order_id} (age={order.age_seconds:.0f}s)")
+                    # Register cooldown to prevent cancel-replace loop (§7.1)
+                    cooldown_key = f"{order.market_id}:{order.outcome_label}"
+                    self._cancel_cooldowns[cooldown_key] = self.COOLDOWN_CYCLES
+                    logger.info(f"Cancelled stale order {order_id} (age={order.age_seconds:.0f}s), "
+                                f"cooldown={self.COOLDOWN_CYCLES} cycles for {cooldown_key}")
                 except Exception as e:
                     logger.warning(f"Failed to cancel stale order {order_id}: {e}")
         return cancelled
+
+    def is_cooled_down(self, market_id: str, outcome_label: str) -> bool:
+        """
+        Returns True if the given market/outcome is still in post-cancel cooldown.
+
+        The decision engine should check this before placing a new order to avoid
+        the cancel-replace loop where stale orders are cancelled and immediately
+        re-issued at the same price every cycle (§7.1).
+        """
+        cooldown_key = f"{market_id}:{outcome_label}"
+        remaining = self._cancel_cooldowns.get(cooldown_key, 0)
+        if remaining > 0:
+            logger.debug(f"Cooldown active for {cooldown_key}: {remaining} cycles remaining")
+            return True
+        return False
+
+    def tick_cooldowns(self):
+        """
+        Decrement all cooldown counters by 1 and remove expired entries.
+
+        Called once per scan cycle from poll_fills() so cooldowns automatically
+        expire after COOLDOWN_CYCLES iterations (§7.1).
+        """
+        expired_keys: List[str] = []
+        for key in self._cancel_cooldowns:
+            self._cancel_cooldowns[key] -= 1
+            if self._cancel_cooldowns[key] <= 0:
+                expired_keys.append(key)
+        for key in expired_keys:
+            del self._cancel_cooldowns[key]
+            logger.debug(f"Cooldown expired for {key}")
 
     def _recalculate_pending(self):
         """Recalculate pending exposure from active orders."""

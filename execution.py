@@ -13,6 +13,7 @@ Ref: Gemini stress test Fix #1 (fill tracking & exposure management).
 import asyncio
 import csv
 import logging
+import os
 import uuid
 from datetime import datetime, date, timezone
 from pathlib import Path
@@ -159,7 +160,12 @@ class OrderExecutor:
     """
     Places orders on Polymarket and registers them with the PositionTracker.
     v3: Returns OpenOrder objects, tracks order_ids, supports fill polling.
+    v3.1: Pre-flight orderbook depth check before placing orders.
     """
+
+    # Minimum orderbook depth (in shares) required at our price level
+    # to avoid placing orders into thin books where we'd wait indefinitely.
+    MIN_BOOK_DEPTH = float(os.getenv("MIN_BOOK_DEPTH", "5.0"))
 
     def __init__(self, tracker: PositionTracker):
         self.client = None
@@ -188,6 +194,48 @@ class OrderExecutor:
         else:
             logger.info("OrderExecutor running in DRY-RUN mode")
 
+    def _check_orderbook_depth(self, signal: TradeSignal) -> bool:
+        """
+        Pre-flight check: is there sufficient liquidity at our price level?
+        Returns True if depth is acceptable or if check is unavailable.
+        Ref: Known limitation #4 — order book depth check before placing orders.
+        """
+        if not self.client or self.dry_run:
+            return True  # can't check in dry-run, assume ok
+
+        try:
+            book = self.client.get_order_book(signal.token_id)
+            if not book:
+                logger.debug(f"No orderbook data for {signal.token_id}")
+                return True  # no data — proceed cautiously
+
+            # For BUY (Yes), check asks; for SELL (buy No), check bids
+            if signal.side == "BUY":
+                levels = book.get("asks", [])
+            else:
+                levels = book.get("bids", [])
+
+            # Sum available size at or near our limit price (within 2¢)
+            available = 0.0
+            for level in levels:
+                level_price = float(level.get("price", 0))
+                level_size = float(level.get("size", 0))
+                if abs(level_price - signal.price_limit) <= 0.02:
+                    available += level_size
+
+            if available < self.MIN_BOOK_DEPTH:
+                logger.info(
+                    f"Thin orderbook for {signal.outcome_label}: "
+                    f"{available:.1f} shares available (min={self.MIN_BOOK_DEPTH}), skipping"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.debug(f"Orderbook depth check failed: {e}")
+            return True  # fail open — don't block trades on check errors
+
     def _build_open_order(self, signal: TradeSignal, order_id: str) -> OpenOrder:
         return OpenOrder(
             order_id=order_id,
@@ -214,6 +262,10 @@ class OrderExecutor:
                 f"| {signal.city} {signal.market_date} (id={order_id})"
             )
             return order
+
+        # Pre-flight: check orderbook depth (v3.1)
+        if not self._check_orderbook_depth(signal):
+            return None
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType

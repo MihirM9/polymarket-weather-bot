@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from api_utils import fetch_with_retry
 from config import cfg
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,19 @@ MODEL_WEIGHTS = {
     "nws": 1.0,       # NWS is the primary, most trusted source
     "owm": 0.7,       # OWM is supplementary, slightly less accurate for US cities
 }
+
+# City-specific peak temperature hour in UTC.
+# Daily high typically occurs 2-4 PM local time.
+# These approximate the afternoon peak for each city's timezone.
+CITY_PEAK_HOUR_UTC = {
+    "New York": 19,      # ~3 PM EDT (UTC-4) or ~2 PM EST (UTC-5)
+    "Chicago": 20,       # ~3 PM CDT (UTC-5) or ~2 PM CST (UTC-6)
+    "Los Angeles": 23,   # ~4 PM PDT (UTC-7) or ~3 PM PST (UTC-8)
+    "Miami": 19,         # ~3 PM EDT (UTC-4)
+    "Houston": 20,       # ~3 PM CDT (UTC-5)
+    "Dallas": 20,        # ~3 PM CDT (UTC-5)
+}
+DEFAULT_PEAK_HOUR_UTC = 20  # fallback
 
 
 @dataclass
@@ -98,6 +112,24 @@ class EnsembleBlender:
                         "Set it in .env for multi-source forecasts.")
         self._owm_cache: Dict[str, Dict[str, float]] = {}  # "city_date" → {high_f, fetched_at}
 
+    def prune_cache(self):
+        """Remove cached forecasts for past dates to prevent memory growth."""
+        today = date.today()
+        stale_keys = []
+        for key in list(self._owm_cache.keys()):
+            # Key format: "city_YYYY-MM-DD"
+            try:
+                date_str = key.rsplit("_", 1)[1]
+                cached_date = date.fromisoformat(date_str)
+                if cached_date < today:
+                    stale_keys.append(key)
+            except (IndexError, ValueError):
+                stale_keys.append(key)
+        for key in stale_keys:
+            del self._owm_cache[key]
+        if stale_keys:
+            logger.debug(f"Pruned {len(stale_keys)} stale OWM cache entries")
+
     async def fetch_owm_forecast(
         self,
         session: aiohttp.ClientSession,
@@ -128,19 +160,12 @@ class EnsembleBlender:
                 weight=MODEL_WEIGHTS["owm"],
             )
 
-        try:
-            url = (
-                f"{OWM_BASE}?lat={lat:.4f}&lon={lon:.4f}"
-                f"&appid={OWM_API_KEY}&units=imperial&exclude=minutely,hourly,alerts"
-            )
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.debug(f"OWM API error {resp.status} for {city}")
-                    return None
-                data = await resp.json()
-
-        except Exception as e:
-            logger.debug(f"OWM fetch exception for {city}: {e}")
+        url = (
+            f"{OWM_BASE}?lat={lat:.4f}&lon={lon:.4f}"
+            f"&appid={OWM_API_KEY}&units=imperial&exclude=minutely,hourly,alerts"
+        )
+        data = await fetch_with_retry(session, url, label=f"OWM-{city}")
+        if not data:
             return None
 
         # Find the daily forecast matching target_date
@@ -156,9 +181,10 @@ class EnsembleBlender:
                 # OWM doesn't provide uncertainty directly;
                 # estimate from "feels_like" spread as a proxy, or use horizon-based
                 now = datetime.now(timezone.utc)
+                peak_hour = CITY_PEAK_HOUR_UTC.get(city, DEFAULT_PEAK_HOUR_UTC)
                 hours_out = max(0, (datetime(
                     target_date.year, target_date.month, target_date.day,
-                    18, 0, tzinfo=timezone.utc  # assume afternoon high
+                    peak_hour, 0, tzinfo=timezone.utc  # city-specific afternoon peak
                 ) - now).total_seconds() / 3600)
 
                 # Use same horizon model as NWS but slightly inflated
@@ -258,6 +284,8 @@ class EnsembleBlender:
         Batch-fetch supplemental forecasts for all city/date pairs.
         Returns dict keyed by "city_date" → ForecastPoint.
         """
+        self.prune_cache()
+
         if not self.enabled:
             return {}
 

@@ -25,8 +25,8 @@ from polymarket_parser import TemperatureMarket, MarketOutcome
 
 logger = logging.getLogger(__name__)
 
-# Polymarket fee rate (approximate combined maker/taker)
-FEE_RATE = 0.02
+# Polymarket fee rate (approximate combined maker/taker) — loaded from config
+FEE_RATE = cfg.fee_rate
 
 
 @dataclass
@@ -227,6 +227,11 @@ class DecisionEngine:
 
                 if price_yes <= 0.01 or price_yes >= 0.99:
                     continue  # illiquid / degenerate
+
+                # Skip outcomes on cancel-replace cooldown (v3.1)
+                if tracker is not None and tracker.is_cooled_down(mkt.market_id, outcome.outcome_label):
+                    logger.debug(f"Skipping cooled-down outcome: {outcome.outcome_label}")
+                    continue
 
                 # --- Evaluate BUY YES side ---
                 ev_y = _ev_yes(p_true, price_yes)

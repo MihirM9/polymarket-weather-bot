@@ -38,6 +38,7 @@ class Config:
     maker_spread_offset: float = float(os.getenv("MAKER_SPREAD_OFFSET", "0.005"))
     maker_fee_rate: float = float(os.getenv("MAKER_FEE_RATE", "0.0"))
     scan_interval_sec: int = int(os.getenv("SCAN_INTERVAL_SEC", "120"))
+    telegram_min_ev: float = float(os.getenv("TELEGRAM_MIN_EV", "0.15"))
 
     # --- Mode ---
     mode: str = os.getenv("MODE", "dry-run")

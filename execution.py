@@ -482,7 +482,9 @@ class OrderExecutor:
                     is_maker=sim_fill.is_maker if sim_fill else False,
                     book_depth=book_depth,
                 )
-                await telegram.trade_alert(signal, order, self.dry_run)
+                # Only send Telegram alerts for high-conviction trades (§ noise filter)
+                if signal.ev >= cfg.telegram_min_ev:
+                    await telegram.trade_alert(signal, order, self.dry_run)
                 executed += 1
             await asyncio.sleep(0.5)
         return executed

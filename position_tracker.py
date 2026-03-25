@@ -19,6 +19,7 @@ intended_exposure (what we hoped would fill) for all risk cap calculations.
 import asyncio
 import csv
 import logging
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone, timedelta
 from enum import Enum
@@ -160,7 +161,19 @@ class PositionTracker:
                      f"${order.intended_size_usd:.2f} @ {order.limit_price:.3f}")
 
     def register_dry_run_fill(self, order: OpenOrder):
-        """For dry-run mode: immediately mark as filled at limit price."""
+        """For dry-run mode: immediately mark as filled at limit price.
+
+        .. deprecated::
+            Use DryRunSimulator + register_order() for realistic dry-run fills.
+            This method assumes perfect instant fills at limit price, which
+            produces unrealistically optimistic results.
+        """
+        warnings.warn(
+            "register_dry_run_fill() is deprecated — use DryRunSimulator + "
+            "register_order() for realistic dry-run simulation",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._reset_daily_if_needed()
         order.status = OrderStatus.FILLED
         order.filled_size_usd = order.intended_size_usd

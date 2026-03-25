@@ -20,8 +20,11 @@ from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import List, Optional
 
+import aiohttp
+
 from config import cfg
 from decision_engine import TradeSignal
+from dry_run_simulator import DryRunSimulator, DryRunFillTracker
 from position_tracker import OpenOrder, OrderStatus, PositionTracker
 
 logger = logging.getLogger(__name__)
@@ -106,7 +109,7 @@ class TelegramAlerter:
 # ── Trade Logger ────────────────────────────────────────────────────
 
 class TradeLogger:
-    """CSV trade logger — v3: includes order_id and fill status columns."""
+    """CSV trade logger — v5: includes slippage, fill_ratio, is_maker, book_depth columns."""
 
     def __init__(self):
         if not TRADE_LOG.exists():
@@ -116,10 +119,20 @@ class TradeLogger:
                     "outcome", "side", "p_true", "market_price", "ev", "edge",
                     "kelly_frac", "intended_usd", "price_limit",
                     "fill_status", "filled_usd", "avg_fill_price",
+                    "slippage", "fill_ratio", "is_maker", "book_depth",
                     "token_id", "market_id", "rationale",
                 ])
 
-    def log_trade(self, signal: TradeSignal, order: OpenOrder, dry_run: bool):
+    def log_trade(
+        self,
+        signal: TradeSignal,
+        order: OpenOrder,
+        dry_run: bool,
+        slippage: float = 0.0,
+        fill_ratio: float = 1.0,
+        is_maker: bool = False,
+        book_depth: float = 0.0,
+    ):
         with open(TRADE_LOG, "a", newline="") as f:
             csv.writer(f).writerow([
                 datetime.now(timezone.utc).isoformat(),
@@ -139,6 +152,10 @@ class TradeLogger:
                 order.status.value,
                 f"{order.filled_size_usd:.2f}",
                 f"{order.avg_fill_price:.4f}",
+                f"{slippage:.4f}",
+                f"{fill_ratio:.4f}",
+                is_maker,
+                f"{book_depth:.2f}",
                 signal.token_id,
                 signal.market_id,
                 signal.rationale,
@@ -220,6 +237,8 @@ class OrderExecutor:
         self.client = None
         self.dry_run = not cfg.is_live
         self.tracker = tracker
+        self.simulator = DryRunSimulator()
+        self.fill_tracker = DryRunFillTracker()
 
         if cfg.is_live:
             try:
@@ -336,11 +355,66 @@ class OrderExecutor:
         if self.dry_run:
             order_id = f"dry-{uuid.uuid4().hex[:12]}"
             order = self._build_open_order(signal, order_id)
-            self.tracker.register_dry_run_fill(order)
+
+            # Fetch real orderbook and simulate realistic fill
+            sim_fill = None
+            snapshot = None
+            try:
+                async with aiohttp.ClientSession() as session:
+                    snapshot = await self.simulator.fetch_orderbook(session, signal.token_id)
+            except Exception as e:
+                logger.warning(f"[DRY-RUN] Orderbook fetch error: {e}")
+
+            if snapshot:
+                sim_fill = self.simulator.simulate_fill(
+                    snapshot, signal.side, signal.position_size_usd,
+                    signal.price_limit, is_maker=True
+                )
+                # Apply simulated fill results
+                order.filled_size_usd = sim_fill.filled_size_usd
+                order.filled_shares = sim_fill.filled_shares
+                order.avg_fill_price = sim_fill.avg_fill_price
+
+                if sim_fill.fill_ratio >= 0.95:
+                    order.status = OrderStatus.FILLED
+                elif sim_fill.fill_ratio > 0:
+                    order.status = OrderStatus.PARTIAL
+                else:
+                    order.status = OrderStatus.PENDING
+
+                # If maker order with delayed fill, register as pending
+                if sim_fill.is_maker and sim_fill.estimated_fill_cycles > 0:
+                    self.fill_tracker.register_pending(order_id, sim_fill, order)
+                else:
+                    self.fill_tracker.record_immediate(sim_fill)
+            else:
+                # Fallback: conservative estimate (50% fill, 1 cent slippage)
+                order.filled_size_usd = signal.position_size_usd * 0.5
+                order.filled_shares = (
+                    order.filled_size_usd / (signal.price_limit + 0.01)
+                    if signal.price_limit > 0 else 0.0
+                )
+                order.avg_fill_price = signal.price_limit + 0.01
+                order.status = OrderStatus.PARTIAL
+
+            self.tracker.register_order(order)
+
+            # Build descriptive log message with fill quality info
+            slippage_str = f"{sim_fill.slippage:.4f}" if sim_fill else "n/a"
+            fill_ratio_str = f"{sim_fill.fill_ratio:.2f}" if sim_fill else "0.50"
+            maker_str = "maker" if (sim_fill and sim_fill.is_maker) else "taker"
             logger.info(
                 f"[DRY-RUN] {signal.side} {signal.outcome_label} "
                 f"${signal.position_size_usd:.2f} @ {signal.price_limit:.3f} "
+                f"| fill={fill_ratio_str} slip={slippage_str} ({maker_str}) "
                 f"| {signal.city} {signal.market_date} (id={order_id})"
+            )
+
+            # Store sim_fill on order for logging (transient attribute)
+            order._sim_fill = sim_fill  # type: ignore[attr-defined]
+            order._book_depth = (  # type: ignore[attr-defined]
+                sum(s for _, s in snapshot.asks) + sum(s for _, s in snapshot.bids)
+                if snapshot else 0.0
             )
             return order
 
@@ -398,7 +472,16 @@ class OrderExecutor:
         for signal in signals:
             order = await self.execute_signal(signal)
             if order:
-                trade_logger.log_trade(signal, order, self.dry_run)
+                # Extract dry-run simulation metadata if available
+                sim_fill = getattr(order, "_sim_fill", None)
+                book_depth = getattr(order, "_book_depth", 0.0)
+                trade_logger.log_trade(
+                    signal, order, self.dry_run,
+                    slippage=sim_fill.slippage if sim_fill else 0.0,
+                    fill_ratio=sim_fill.fill_ratio if sim_fill else 1.0,
+                    is_maker=sim_fill.is_maker if sim_fill else False,
+                    book_depth=book_depth,
+                )
                 await telegram.trade_alert(signal, order, self.dry_run)
                 executed += 1
             await asyncio.sleep(0.5)

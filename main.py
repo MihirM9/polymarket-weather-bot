@@ -86,15 +86,29 @@ async def run_scan_cycle(
     telegram: TelegramAlerter,
     trade_logger: TradeLogger,
     metar_fetcher: MetarFetcher,
+    cycle_count: int = 0,
 ) -> int:
     cycle_start = datetime.now(timezone.utc)
-    logger.info(f"=== Scan cycle start: {cycle_start.isoformat()} ===")
+    logger.info(f"=== Scan cycle start: {cycle_start.isoformat()} (cycle #{cycle_count}) ===")
 
     # Step 0: Poll fills on open orders (v3 Fix #1)
     if not executor.dry_run:
         fill_changes = await tracker.poll_fills()
         if fill_changes:
             logger.info(f"Fill poll: {fill_changes} order(s) updated. {tracker.get_exposure_summary()}")
+    else:
+        # Dry-run: tick simulated maker fills forward by one cycle
+        newly_filled = executor.fill_tracker.tick(cycle_count)
+        for order in newly_filled:
+            tracker._daily_realized += order.filled_size_usd
+            logger.info(
+                f"[DRY-RUN] Simulated maker fill: {order.outcome_label} "
+                f"${order.filled_size_usd:.2f} @ {order.avg_fill_price:.3f}"
+            )
+        tracker._recalculate_pending()
+        if newly_filled:
+            logger.info(f"Dry-run fill tick: {len(newly_filled)} order(s) filled. "
+                        f"{executor.fill_tracker.get_summary()}")
     logger.info(f"Exposure state: {tracker.get_exposure_summary()}")
 
     # Step 1: Check daily loss cap
@@ -243,7 +257,8 @@ async def main():
             cycle_count += 1
             executed = await run_scan_cycle(
                 scanner, blender, parser, engine, executor,
-                tracker, telegram, trade_logger, metar_fetcher
+                tracker, telegram, trade_logger, metar_fetcher,
+                cycle_count=cycle_count,
             )
             total_trades += executed
 

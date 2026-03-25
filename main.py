@@ -37,15 +37,18 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, date as date_type, timezone
+
+import aiohttp
 
 from config import cfg
 from forecast_scanner import ForecastScanner, CityForecast, compute_confidence
 from polymarket_parser import PolymarketParser
 from decision_engine import DecisionEngine
-from ensemble_blender import EnsembleBlender
+from ensemble_blender import EnsembleBlender, ForecastPoint
 from position_tracker import PositionTracker
-from execution import OrderExecutor, TelegramAlerter, TradeLogger
+from execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
+from metar_fetcher import MetarFetcher
 
 # ── Logging ──
 
@@ -82,6 +85,7 @@ async def run_scan_cycle(
     tracker: PositionTracker,
     telegram: TelegramAlerter,
     trade_logger: TradeLogger,
+    metar_fetcher: MetarFetcher,
 ) -> int:
     cycle_start = datetime.now(timezone.utc)
     logger.info(f"=== Scan cycle start: {cycle_start.isoformat()} ===")
@@ -110,11 +114,49 @@ async def run_scan_cycle(
     cities_dates = [(fc.city, fc.forecast_date) for fc in forecasts]
     owm_forecasts = await blender.fetch_all_supplemental(cities_dates)
 
+    # Fetch METAR observations (v4: third ensemble source)
+    metar_observations = await metar_fetcher.fetch_all()
+
+    # Fetch NOAA station observations for same-day markets (v4: station-specific)
+    station_observations: dict = {}
+    today = date_type.today()
+    same_day_cities = set(fc.city for fc in forecasts if fc.forecast_date == today)
+    if same_day_cities:
+        async with aiohttp.ClientSession() as session:
+            for city in same_day_cities:
+                station_id = cfg.noaa_stations.get(city)
+                if station_id:
+                    temp_f = await scanner.fetch_station_observation(session, station_id)
+                    if temp_f is not None:
+                        station_observations[city] = temp_f
+
     # Apply ensemble blending to each NWS forecast
     for fc in forecasts:
         key = f"{fc.city}_{fc.forecast_date.isoformat()}"
         owm_point = owm_forecasts.get(key)
         supplemental = [owm_point] if owm_point else []
+
+        # For same-day forecasts, add METAR and station observations as ensemble sources
+        if fc.forecast_date == today:
+            # METAR observation (v4: aviation weather ground truth)
+            metar_obs = metar_observations.get(fc.city)
+            if metar_obs:
+                supplemental.append(ForecastPoint(
+                    source="metar",
+                    high_f=metar_obs.temp_f,
+                    sigma=0.5,
+                    weight=1.5,
+                ))
+
+            # NOAA station observation (v4: station-specific ground truth)
+            station_temp = station_observations.get(fc.city)
+            if station_temp is not None:
+                supplemental.append(ForecastPoint(
+                    source="noaa_station",
+                    high_f=station_temp,
+                    sigma=0.5,
+                    weight=1.5,
+                ))
 
         ensemble = blender.blend(fc.high_f, fc.sigma, supplemental)
 
@@ -182,6 +224,8 @@ async def main():
     executor = OrderExecutor(tracker)
     telegram = TelegramAlerter()
     trade_logger = TradeLogger()
+    perf_tracker = PerformanceTracker()
+    metar_fetcher = MetarFetcher()
 
     await telegram.send(
         f"*Bot Started v3* ({'LIVE' if cfg.is_live else 'DRY-RUN'})\n"
@@ -199,12 +243,14 @@ async def main():
             cycle_count += 1
             executed = await run_scan_cycle(
                 scanner, blender, parser, engine, executor,
-                tracker, telegram, trade_logger
+                tracker, telegram, trade_logger, metar_fetcher
             )
             total_trades += executed
 
             if cycle_count % 50 == 0:
+                perf_tracker.record_daily_pnl(engine.daily_pnl, cfg.bankroll)
                 await telegram.daily_summary(engine.daily_pnl, total_trades, tracker)
+                logger.info(f"Performance: {perf_tracker.get_summary()}")
 
         except Exception as e:
             logger.exception(f"Scan cycle error: {e}")
@@ -221,7 +267,8 @@ async def main():
         f"*Bot Stopped v3*\n"
         f"Total trades: {total_trades}\n"
         f"PnL: ${engine.daily_pnl:+.2f}\n"
-        f"{tracker.get_exposure_summary()}"
+        f"{tracker.get_exposure_summary()}\n"
+        f"{perf_tracker.get_summary()}"
     )
 
 if __name__ == "__main__":

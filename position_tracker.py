@@ -100,6 +100,9 @@ class PositionTracker:
         # Cooldown tracker: "market_id:outcome_label" → remaining cycles (§7.1)
         # Prevents cancel-replace loops by suppressing re-orders after stale cancels
         self._cancel_cooldowns: Dict[str, int] = {}
+        self._fill_speeds: List[float] = []
+        self._instant_fill_count: int = 0
+        self._total_fills: int = 0
 
         self._init_log()
 
@@ -139,6 +142,9 @@ class PositionTracker:
             self._daily_realized = 0.0
             self._daily_pending = 0.0
             self._cancel_cooldowns.clear()
+            self._fill_speeds.clear()
+            self._instant_fill_count = 0
+            self._total_fills = 0
             self._today = today
 
     def set_clob_client(self, client):
@@ -209,6 +215,15 @@ class PositionTracker:
                 if clob_status in ("matched", "filled", "closed"):
                     order.status = OrderStatus.FILLED
                     changed += 1
+                    fill_time = order.age_seconds
+                    self._fill_speeds.append(fill_time)
+                    self._total_fills += 1
+                    if fill_time < 10:
+                        self._instant_fill_count += 1
+                        logger.warning(
+                            f"Instant fill ({fill_time:.1f}s) for {order.outcome_label} — "
+                            f"possible adverse selection"
+                        )
                 elif size_matched > 0 and clob_status in ("live", "open"):
                     order.status = OrderStatus.PARTIAL
                     changed += 1
@@ -324,11 +339,26 @@ class PositionTracker:
         return sum(1 for o in self._orders.values()
                    if o.status == OrderStatus.FILLED)
 
+    @property
+    def adverse_selection_rate(self) -> float:
+        if self._total_fills == 0:
+            return 0.0
+        return self._instant_fill_count / self._total_fills
+
+    @property
+    def avg_fill_speed(self) -> float:
+        if not self._fill_speeds:
+            return 0.0
+        return sum(self._fill_speeds) / len(self._fill_speeds)
+
     def get_exposure_summary(self) -> str:
+        adv_sel = f", adv_sel={self.adverse_selection_rate:.0%}" if self._total_fills > 0 else ""
+        fill_spd = f", avg_fill={self.avg_fill_speed:.0f}s" if self._fill_speeds else ""
         return (
             f"Exposure: realized=${self.realized_exposure:.2f}, "
             f"pending=${self.pending_exposure:.2f}, "
             f"total=${self.total_exposure:.2f}, "
             f"active_orders={self.active_order_count}, "
             f"filled={self.filled_order_count}"
+            f"{adv_sel}{fill_spd}"
         )

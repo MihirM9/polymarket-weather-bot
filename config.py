@@ -31,9 +31,12 @@ class Config:
     daily_loss_cap: float = float(os.getenv("DAILY_LOSS_CAP", "50"))
     per_market_max_pct: float = float(os.getenv("PER_MARKET_MAX_PCT", "0.03"))
     kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.15"))
+    max_kelly_mult: float = float(os.getenv("MAX_KELLY_MULT", "1.25"))
     min_ev_threshold: float = float(os.getenv("MIN_EV_THRESHOLD", "0.03"))
     min_edge: float = float(os.getenv("MIN_EDGE", "0.08"))
     fee_rate: float = float(os.getenv("FEE_RATE", "0.02"))
+    maker_spread_offset: float = float(os.getenv("MAKER_SPREAD_OFFSET", "0.005"))
+    maker_fee_rate: float = float(os.getenv("MAKER_FEE_RATE", "0.0"))
     scan_interval_sec: int = int(os.getenv("SCAN_INTERVAL_SEC", "120"))
 
     # --- Mode ---
@@ -85,6 +88,18 @@ class Config:
                     self.nws_points[name.strip()] = (float(parts[0]), float(parts[1]))
                 except ValueError:
                     continue
+
+        raw_stations = os.getenv(
+            "NOAA_STATIONS",
+            "New York:KNYC,Chicago:KORD,Los Angeles:KLAX,"
+            "Miami:KMIA,Houston:KIAH,Dallas:KDFW"
+        )
+        self.noaa_stations: Dict[str, str] = {}
+        for pair in raw_stations.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                city_name, station = pair.split(":", 1)
+                self.noaa_stations[city_name.strip()] = station.strip()
 
     @property
     def is_live(self) -> bool:

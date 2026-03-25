@@ -13,6 +13,7 @@ Ref: Gemini stress test Fix #1 (fill tracking & exposure management).
 import asyncio
 import csv
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, date, timezone
@@ -48,7 +49,7 @@ class TelegramAlerter:
             return
         import aiohttp
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
+        payload = {"chat_id": self.chat_id, "text": message}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -154,6 +155,54 @@ class TradeLogger:
             ])
 
 
+# ── Performance Tracker ─────────────────────────────────────────────
+
+class PerformanceTracker:
+    """Tracks risk-adjusted performance metrics (Paper Appendix A)."""
+
+    def __init__(self):
+        self._daily_returns: List[float] = []
+        self._trade_returns: List[float] = []
+
+    def record_daily_pnl(self, pnl: float, bankroll: float):
+        if bankroll > 0:
+            self._daily_returns.append(pnl / bankroll)
+
+    def record_trade_return(self, pnl: float, size: float):
+        if size > 0:
+            self._trade_returns.append(pnl / size)
+
+    @property
+    def sharpe_ratio(self) -> float:
+        if len(self._daily_returns) < 2:
+            return 0.0
+        mean_r = sum(self._daily_returns) / len(self._daily_returns)
+        variance = sum((r - mean_r) ** 2 for r in self._daily_returns) / (len(self._daily_returns) - 1)
+        std_r = math.sqrt(variance) if variance > 0 else 0.001
+        return (mean_r / std_r) * math.sqrt(365)
+
+    @property
+    def win_rate(self) -> float:
+        if not self._trade_returns:
+            return 0.0
+        return sum(1 for r in self._trade_returns if r > 0) / len(self._trade_returns)
+
+    @property
+    def avg_return(self) -> float:
+        if not self._trade_returns:
+            return 0.0
+        return sum(self._trade_returns) / len(self._trade_returns)
+
+    def get_summary(self) -> str:
+        return (
+            f"Sharpe={self.sharpe_ratio:.2f}, "
+            f"WinRate={self.win_rate:.0%}, "
+            f"AvgReturn={self.avg_return:.1%}, "
+            f"Days={len(self._daily_returns)}, "
+            f"Trades={len(self._trade_returns)}"
+        )
+
+
 # ── Order Executor (v3: fill-tracking aware) ──────────────────────
 
 class OrderExecutor:
@@ -236,6 +285,38 @@ class OrderExecutor:
             logger.debug(f"Orderbook depth check failed: {e}")
             return True  # fail open — don't block trades on check errors
 
+    def _get_maker_price(self, signal: TradeSignal) -> Optional[float]:
+        """
+        Attempt to place a passive limit order just inside the spread.
+        Returns an adjusted maker price, or None if unavailable.
+        Makers pay 0% fees on Polymarket, so pricing at/near the spread
+        improves effective EV significantly.
+        """
+        if self.dry_run or not self.client:
+            return None
+
+        try:
+            book = self.client.get_order_book(signal.token_id)
+            if not book:
+                return None
+
+            if signal.side == "BUY":
+                bids = book.get("bids", [])
+                if not bids:
+                    return None
+                best_bid = max(float(b.get("price", 0)) for b in bids)
+                return min(best_bid + cfg.maker_spread_offset, signal.price_limit)
+            else:
+                asks = book.get("asks", [])
+                if not asks:
+                    return None
+                best_ask = min(float(a.get("price", 0)) for a in asks)
+                return max(best_ask - cfg.maker_spread_offset, signal.price_limit)
+
+        except Exception as e:
+            logger.debug(f"Maker price fetch failed: {e}")
+            return None
+
     def _build_open_order(self, signal: TradeSignal, order_id: str) -> OpenOrder:
         return OpenOrder(
             order_id=order_id,
@@ -272,7 +353,8 @@ class OrderExecutor:
             from py_clob_client.order_builder.constants import BUY, SELL
 
             side = BUY if signal.side == "BUY" else SELL
-            price = signal.price_limit
+            maker_price = self._get_maker_price(signal)
+            price = maker_price if maker_price is not None else signal.price_limit
             size = signal.position_size_usd / price if price > 0 else 0
 
             order_args = OrderArgs(

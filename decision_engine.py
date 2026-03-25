@@ -15,15 +15,24 @@ For each matched (market, forecast) pair:
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import cfg
 from forecast_scanner import CityForecast, bucket_probabilities
 from polymarket_parser import TemperatureMarket, MarketOutcome
 
 logger = logging.getLogger(__name__)
+
+CORRELATION_GROUPS = {
+    "northeast": ["New York", "Chicago"],
+    "gulf": ["Houston", "Miami"],
+    "south_central": ["Dallas", "Houston"],
+    "west": ["Los Angeles"],
+}
+CORRELATED_GROUP_CAP_MULT = 1.5
 
 # Polymarket fee rate (approximate combined maker/taker) — loaded from config
 FEE_RATE = cfg.fee_rate
@@ -116,12 +125,14 @@ class DecisionEngine:
         self.daily_pnl: float = 0.0         # tracked across the day
         self.daily_exposure: float = 0.0     # total $ at risk today
         self._today: Optional[date] = None
+        self._group_exposure: Dict[str, float] = {}
 
     def _reset_daily_if_needed(self):
         today = date.today()
         if self._today != today:
             self.daily_pnl = 0.0
             self.daily_exposure = 0.0
+            self._group_exposure = {}
             self._today = today
 
     def update_pnl(self, realized_pnl: float):
@@ -152,6 +163,7 @@ class DecisionEngine:
         while low-confidence ones are damped to 0.25x.
         """
         scaling = 0.25 + 1.25 * confidence  # range: [0.25, 1.50]
+        scaling = min(scaling, cfg.max_kelly_mult)
         return base_fraction * scaling
 
     @staticmethod
@@ -176,6 +188,24 @@ class DecisionEngine:
         # Uncertainty penalty: up to +0.15 edge required at worst case
         uncertainty_penalty = (1.0 - confidence) * 0.05 + max(0, sigma - 1.5) * 0.02
         return base_edge + uncertainty_penalty
+
+    @staticmethod
+    def _time_decay_ev_threshold(base_threshold: float, days_to_resolution: int) -> float:
+        """Scale EV threshold by sqrt of days to resolution — farther out markets need higher EV."""
+        return base_threshold * math.sqrt(max(1, days_to_resolution))
+
+    def _get_city_groups(self, city: str) -> List[str]:
+        """Return all correlation group names that contain this city."""
+        return [group for group, cities in CORRELATION_GROUPS.items() if city in cities]
+
+    def _check_group_exposure(self, city: str, proposed_size: float) -> float:
+        """Cap proposed_size so no correlation group exceeds its cap."""
+        group_cap = cfg.per_market_max_pct * cfg.bankroll * CORRELATED_GROUP_CAP_MULT
+        for group in self._get_city_groups(city):
+            current = self._group_exposure.get(group, 0.0)
+            remaining = max(0.0, group_cap - current)
+            proposed_size = min(proposed_size, remaining)
+        return proposed_size
 
     def evaluate(
         self,
@@ -221,6 +251,9 @@ class DecisionEngine:
             adaptive_kelly = self._adaptive_kelly_fraction(cfg.kelly_fraction, fc.confidence)
             dynamic_edge = self._dynamic_edge_threshold(cfg.min_edge, fc.confidence, fc.sigma)
 
+            days_to_res = max(1, (mkt.market_date - date.today()).days)
+            time_adj_ev_threshold = self._time_decay_ev_threshold(cfg.min_ev_threshold, days_to_res)
+
             for i, outcome in enumerate(mkt.outcomes):
                 p_true = probs.get(i, 0.0)
                 price_yes = outcome.price_yes
@@ -234,12 +267,12 @@ class DecisionEngine:
                     continue
 
                 # --- Evaluate BUY YES side ---
-                ev_y = _ev_yes(p_true, price_yes)
+                ev_y = _ev_yes(p_true, price_yes, fee=cfg.maker_fee_rate)
                 edge_y = p_true - price_yes
                 kelly_y = _kelly_yes(p_true, price_yes) * adaptive_kelly
 
-                if ev_y > cfg.min_ev_threshold and edge_y > dynamic_edge:
-                    size = self._size_position(kelly_y, tracker)
+                if ev_y > time_adj_ev_threshold and edge_y > dynamic_edge:
+                    size = self._size_position(kelly_y, tracker, city=mkt.city)
                     if size > 0:
                         signals.append(TradeSignal(
                             market_id=mkt.market_id,
@@ -260,18 +293,18 @@ class DecisionEngine:
                                 f"edge={edge_y:.3f} (thresh={dynamic_edge:.3f}), EV={ev_y:.3f}, "
                                 f"forecast={fc.high_f:.0f}°F±{fc.sigma:.1f} ({fc.weather_regime}), "
                                 f"conf={fc.confidence:.2f}, kelly_adj={adaptive_kelly:.3f}, "
-                                f"bucket=[{outcome.bucket_low}–{outcome.bucket_high}]"
+                                f"bucket=[{outcome.bucket_low}–{outcome.bucket_high}], days_out={days_to_res}"
                             ),
                         ))
 
                 # --- Evaluate BUY NO side (sell Yes / buy No) ---
                 # This is the "sell extremes" play (§2.3: selling extremes No at 0.93-0.99)
-                ev_n = _ev_no(p_true, price_yes)
+                ev_n = _ev_no(p_true, price_yes, fee=cfg.maker_fee_rate)
                 edge_n = (1.0 - p_true) - (1.0 - price_yes)  # = price_yes - p_true
                 kelly_n = _kelly_no(p_true, price_yes) * adaptive_kelly
 
-                if ev_n > cfg.min_ev_threshold and edge_n > dynamic_edge:
-                    size = self._size_position(kelly_n, tracker)
+                if ev_n > time_adj_ev_threshold and edge_n > dynamic_edge:
+                    size = self._size_position(kelly_n, tracker, city=mkt.city)
                     if size > 0:
                         price_no = 1.0 - price_yes
                         signals.append(TradeSignal(
@@ -293,7 +326,7 @@ class DecisionEngine:
                                 f"edge_no={edge_n:.3f} (thresh={dynamic_edge:.3f}), EV={ev_n:.3f}, "
                                 f"forecast={fc.high_f:.0f}°F±{fc.sigma:.1f} ({fc.weather_regime}), "
                                 f"conf={fc.confidence:.2f}, kelly_adj={adaptive_kelly:.3f}, "
-                                f"bucket=[{outcome.bucket_low}–{outcome.bucket_high}]"
+                                f"bucket=[{outcome.bucket_low}–{outcome.bucket_high}], days_out={days_to_res}"
                             ),
                         ))
 
@@ -302,11 +335,12 @@ class DecisionEngine:
         logger.info(f"Decision engine produced {len(signals)} trade signals")
         return signals
 
-    def _size_position(self, kelly_frac: float, tracker=None) -> float:
+    def _size_position(self, kelly_frac: float, tracker=None, city: str = "") -> float:
         """
         Convert Kelly fraction to USDC size with caps.
         v3: Uses PositionTracker's realized_exposure when available,
         falling back to self.daily_exposure for backward compat / dry-run.
+        v4: Correlated exposure group caps.
         """
         raw_size = kelly_frac * cfg.bankroll
 
@@ -327,9 +361,19 @@ class DecisionEngine:
         remaining_budget = cfg.bankroll * 0.3 - current_exposure
         raw_size = min(raw_size, max(0.0, remaining_budget))
 
+        # Correlated exposure group cap (v4)
+        if city:
+            raw_size = self._check_group_exposure(city, raw_size)
+
         # Floor: don't bother with dust
         if raw_size < 1.0:
             return 0.0
 
         self.daily_exposure += raw_size
+
+        # Update group exposure tracking
+        if city:
+            for group in self._get_city_groups(city):
+                self._group_exposure[group] = self._group_exposure.get(group, 0.0) + raw_size
+
         return round(raw_size, 2)

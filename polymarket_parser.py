@@ -13,6 +13,7 @@ Uses the Gamma API (gamma-api.polymarket.com) to:
 """
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -193,6 +194,8 @@ class PolymarketParser:
                     # Parse outcomes / tokens
                     tokens = item.get("tokens", [])
                     outcomes_raw = item.get("outcomes", [])
+                    if isinstance(outcomes_raw, str):
+                        outcomes_raw = json.loads(outcomes_raw)
 
                     if tokens:
                         for tok in tokens:
@@ -219,7 +222,11 @@ class PolymarketParser:
                     elif outcomes_raw:
                         # Some markets list outcomes as string array + separate clobTokenIds
                         clob_ids = item.get("clobTokenIds", [])
+                        if isinstance(clob_ids, str):
+                            clob_ids = json.loads(clob_ids)
                         outcome_prices = item.get("outcomePrices", [])
+                        if isinstance(outcome_prices, str):
+                            outcome_prices = json.loads(outcome_prices)
                         for idx, label in enumerate(outcomes_raw):
                             token_id = clob_ids[idx] if idx < len(clob_ids) else ""
                             price = float(outcome_prices[idx]) if idx < len(outcome_prices) else 0.0

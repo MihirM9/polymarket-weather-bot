@@ -190,7 +190,7 @@ class EnsembleBlender:
                 # Use same horizon model as NWS but slightly inflated
                 # (OWM is generally less accurate for US cities)
                 from forecast_scanner import _sigma_for_horizon
-                sigma = _sigma_for_horizon(hours_out) * 1.15
+                sigma = _sigma_for_horizon(hours_out, forecast_date=target_date) * 1.15
 
                 result = ForecastPoint(
                     source="owm",

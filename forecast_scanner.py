@@ -43,12 +43,41 @@ SIGMA_BY_HORIZON: List[Tuple[int, float]] = [
 ]
 
 
-def _sigma_for_horizon(hours_out: float) -> float:
-    """Return forecast uncertainty σ (°F) given hours until resolution."""
+# Seasonal sigma multipliers — spring is more volatile, mid-summer is stable.
+# Ref: §5.1 known limitation #5 (seasonal σ adjustment).
+SEASONAL_SIGMA_MULT: Dict[int, float] = {
+    1: 1.15,   # January — winter storms
+    2: 1.2,    # February — late winter variability
+    3: 1.3,    # March — spring transition, high volatility
+    4: 1.35,   # April — peak spring volatility
+    5: 1.2,    # May — settling into summer pattern
+    6: 1.0,    # June — stable
+    7: 0.9,    # July — mid-summer, very stable
+    8: 0.9,    # August — mid-summer, very stable
+    9: 1.0,    # September — early fall
+    10: 1.15,  # October — fall transition
+    11: 1.2,   # November — late fall variability
+    12: 1.15,  # December — winter
+}
+
+
+def _sigma_for_horizon(hours_out: float, forecast_date: Optional[date] = None) -> float:
+    """Return forecast uncertainty σ (°F) given hours until resolution.
+
+    If forecast_date is provided, applies seasonal sigma multiplier
+    (spring months are more volatile than mid-summer).
+    """
+    base_sigma = 6.0  # beyond 7 days — very uncertain
     for threshold, sigma in SIGMA_BY_HORIZON:
         if hours_out <= threshold:
-            return sigma
-    return 6.0  # beyond 7 days — very uncertain
+            base_sigma = sigma
+            break
+
+    if forecast_date is not None:
+        seasonal_mult = SEASONAL_SIGMA_MULT.get(forecast_date.month, 1.0)
+        base_sigma *= seasonal_mult
+
+    return base_sigma
 
 
 def _normal_cdf(x: float, mu: float, sigma: float) -> float:
@@ -244,7 +273,7 @@ class ForecastScanner:
                 continue
 
             hours_out = max(0.0, (start_dt - now).total_seconds() / 3600.0)
-            sigma_base = _sigma_for_horizon(hours_out)
+            sigma_base = _sigma_for_horizon(hours_out, forecast_date=forecast_date)
 
             # Weather regime detection — inflate σ for volatile patterns
             detail_text = p.get("detailedForecast", "") or p.get("shortForecast", "")
@@ -299,3 +328,32 @@ class ForecastScanner:
 
         logger.info(f"Forecast scan complete: {len(forecasts)} city-date pairs across {len(cfg.cities)} cities")
         return forecasts
+
+    async def fetch_station_observation(
+        self, session: aiohttp.ClientSession, station_id: str
+    ) -> Optional[float]:
+        """
+        Fetch the latest observation from a specific NOAA station.
+        Returns observed temperature in °F, or None on failure.
+
+        Uses the NWS stations API: /stations/{station_id}/observations/latest
+        Temperature is returned in °C by the API and converted to °F.
+        """
+        url = f"{NWS_BASE}/stations/{station_id}/observations/latest"
+        data = await fetch_with_retry(
+            session, url, headers=NWS_HEADERS, label=f"NWS-station-{station_id}"
+        )
+        if not data:
+            return None
+
+        try:
+            temp_c = data["properties"]["temperature"]["value"]
+            if temp_c is None:
+                logger.debug(f"Station {station_id}: temperature value is null")
+                return None
+            temp_f = temp_c * 9.0 / 5.0 + 32.0
+            logger.debug(f"Station {station_id}: observed {temp_f:.1f}°F ({temp_c:.1f}°C)")
+            return temp_f
+        except (KeyError, TypeError) as e:
+            logger.warning(f"Station {station_id}: failed to parse observation: {e}")
+            return None

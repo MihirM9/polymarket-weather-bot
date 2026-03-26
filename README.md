@@ -1,150 +1,210 @@
-# Polymarket Weather Trading Bot
+# Polymarket Weather Trading Bot v4
 
-Autonomous trading bot for Polymarket US city daily high-temperature bucket markets.
-Exploits systematic mispricing between high-accuracy NOAA/NWS forecasts (~90% at 5-day,
-1-2°F short-term) and retail-heavy market pricing.
+Autonomous Python trading bot for Polymarket US city daily high-temperature bucket markets. Trades on Polygon (chain_id=137) via py-clob-client. Exploits systematic mispricing between NOAA/NWS forecast accuracy (~90% at 5-day, 1-2F short-term) and retail market pricing.
+
+## How It Works
+
+Polymarket hosts daily prediction markets like: *"Will the highest temperature in Chicago be between 70-71F on March 26?"* Each city/date has ~11 temperature buckets (e.g., 60-61F, 62-63F, ... 80F+), each priced by the market as a probability.
+
+The bot:
+1. **Fetches weather forecasts** from NWS/NOAA, METAR (aviation weather), and NOAA station observations
+2. **Blends multiple data sources** into a single forecast with uncertainty (ensemble blending)
+3. **Converts the forecast into bucket probabilities** using a Gaussian CDF model
+4. **Compares those probabilities against market prices** on Polymarket
+5. **Trades when it finds mispricing** -- if the bot thinks a bucket has a 25% chance but the market prices it at 7%, that's an edge
+6. **Manages risk** with 13 layers of controls (Kelly sizing, exposure caps, loss limits, etc.)
+
+The main loop runs every 2 minutes: poll fills -> forecast -> blend -> parse markets -> decide -> execute.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│ forecast_scanner │────▶│ polymarket_parser │────▶│ decision_engine │────▶│   execution      │
-│ (NWS/NOAA API)  │     │ (Gamma API)       │     │ (EV/Kelly/Risk) │     │ (CLOB/Telegram)  │
-└─────────────────┘     └──────────────────┘     └─────────────────┘     └─────────────────┘
+Position Tracker <-- poll CLOB for fill status (start of each cycle)
+       |
+Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
+(NWS/NOAA)           (NWS + OWM +     <-- METAR Fetcher (aviation weather)
+                      METAR + Station)  <-- NOAA Station Obs (resolution source)
+                           |
+                    Polymarket Parser
+                    (Gamma API)
+                           |
+                    Decision Engine <-- tracker.total_exposure
+                    (EV / Kelly / Risk)
+                           |
+                    Execution --> PositionTracker.register()
+                    (CLOB / Telegram / CSV)
 ```
-
-**Main loop**: Every 2 minutes → scan forecasts → discover markets → evaluate EV → execute.
 
 ## Modules
 
-| Module | File | Role |
-|--------|------|------|
-| Config | `config.py` | Loads `.env`, typed access to all params |
-| Module 1 | `forecast_scanner.py` | NWS API → daily high forecasts → Gaussian bucket probs |
-| Module 2 | `polymarket_parser.py` | Gamma API → active temp markets → match to cities/dates |
-| Module 3 | `decision_engine.py` | EV calc, Kelly sizing, risk caps, signal ranking |
-| Module 4 | `execution.py` | Order placement (py-clob-client), CSV logging, Telegram |
-| Main | `main.py` | Async scan loop, graceful shutdown |
+| File | Purpose |
+|------|---------|
+| `main.py` | Async main loop, scan orchestration, graceful shutdown |
+| `config.py` | Loads .env, typed Config singleton |
+| `api_utils.py` | Shared HTTP retry/backoff for all external API calls |
+| `forecast_scanner.py` | NWS API -> Gaussian bucket probabilities, negation-aware regime detection, seasonal sigma, station observations |
+| `ensemble_blender.py` | NWS + OWM + METAR + Station blending, dynamic sigma, city-specific peak hours, cache pruning |
+| `metar_fetcher.py` | METAR aviation weather real-time observations (aviationweather.gov), temp parsing |
+| `polymarket_parser.py` | Gamma API market discovery, bucket parsing (regex) with parse metrics, city/date matching |
+| `decision_engine.py` | EV calc, capped Kelly, time-decay sizing, correlated exposure caps, maker fee EV, seasonal sigma |
+| `position_tracker.py` | CLOB fill polling, exposure tracking, stale cancel cooldown, adverse selection detection |
+| `execution.py` | ClobClient orders, maker/taker pricing, orderbook depth, Sharpe tracking, CSV/Telegram |
+| `dry_run_simulator.py` | Realistic paper trading -- fetches live orderbooks, simulates partial fills and slippage |
+
+## Key Math
+
+- **Bucket probabilities**: Gaussian CDF integration. `P(bucket) = CDF((hi - mu) / sigma) - CDF((lo - mu) / sigma)` where mu = forecast high, sigma = horizon + regime + seasonal adjusted
+- **EV Yes**: `p_true * (1 - price) * (1 - fee) - (1 - p_true) * price`
+- **EV No**: `(1 - p_true) * price_yes * (1 - fee) - p_true * (1 - price_yes)`
+- **Kelly**: `f* = (b*p - q) / b` where `b = (1-price)/price`, tempered by confidence and capped
+- **Ensemble sigma**: `sqrt(sigma_base^2 + sigma_spread^2)` where sigma_spread = std dev across model forecasts
+- **Seasonal sigma**: Base sigma * monthly multiplier (Apr=1.35x more volatile, Jul=0.9x tighter)
+- **Time-decay**: `min_ev * sqrt(days_to_resolution)` -- demands higher EV for longer-duration trades
+
+## Risk Controls (13 layers)
+
+| # | Control | Default |
+|---|---------|---------|
+| 1 | Capped confidence-adaptive Kelly | 0.25x-1.25x base, hard cap |
+| 2 | Dynamic edge threshold | 8-21 cents depending on uncertainty |
+| 3 | Time-decay EV threshold | Scales with sqrt(days) |
+| 4 | Seasonal sigma adjustment | Spring/fall inflated, summer tighter |
+| 5 | Per-market cap | 3% of bankroll |
+| 6 | Absolute position cap | $10 default |
+| 7 | Correlated exposure caps | NYC+Chicago share 1.5x single-city cap |
+| 8 | Daily exposure cap | 30% of bankroll |
+| 9 | Daily loss cap | $50 default, auto-shutdown |
+| 10 | Cancel-replace cooldown | 3 cycles after stale order cancel |
+| 11 | Orderbook depth check | Min liquidity before placing orders |
+| 12 | Adverse selection detection | Flags instant fills as informed counter-trading |
+| 13 | Maker/taker optimization | Passive limit orders for 0% fees |
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install
 ```bash
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate
+pip install aiohttp python-dotenv
 ```
 
 ### 2. Configure
 ```bash
 cp .env.example .env
-# Edit .env with your:
-#   - Polygon private key (PRIVATE_KEY)
-#   - Telegram bot token + chat ID (optional but recommended)
-#   - Bankroll and risk parameters
-#   - MODE=dry-run (default) or MODE=live
+nano .env
 ```
 
-### 3. Run in dry-run mode (RECOMMENDED FIRST)
+Key settings:
+- `MODE=dry-run` (default, no real money)
+- `PRIVATE_KEY` -- leave as dummy for dry-run
+- `BANKROLL=500` -- simulated bankroll in USDC
+- `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` -- optional alerts
+- `TELEGRAM_MIN_EV=0.15` -- only alert on 15%+ EV trades
+
+### 3. Run (paper trading)
 ```bash
-mkdir -p logs
-python main.py
+python3 main.py
 ```
 
-Dry-run will:
-- Fetch real NWS forecasts and Polymarket prices
-- Compute real EV/Kelly signals
-- Simulate fills (no real orders)
-- Log everything to `logs/trades.csv` and `logs/scans.csv`
-- Send Telegram alerts (if configured)
+The bot will:
+- Fetch real NWS forecasts and real Polymarket prices
+- Compute real probabilities and edge
+- Simulate trades against live orderbook depth (partial fills, slippage)
+- Log everything to `logs/trades.csv` and `logs/dry_run_fills.csv`
+- Send Telegram alerts for high-EV trades (if configured)
 
-### 4. Review logs
+**No real money is used in dry-run mode.**
+
+### 4. Check results
 ```bash
 # Trade decisions
 cat logs/trades.csv
 
-# Scan summaries
-cat logs/scans.csv
+# Dry-run fill simulation
+cat logs/dry_run_fills.csv
 
-# Full bot log
-tail -f logs/bot.log
+# Check actual temperatures the next day at weather.gov
+# Compare against what the bot traded
 ```
 
 ### 5. Go live (only after validating dry-run)
 ```bash
 # In .env:
 MODE=live
-
-# Ensure PRIVATE_KEY has USDC on Polygon
-python main.py
+PRIVATE_KEY=0xYOUR_REAL_POLYGON_PRIVATE_KEY
 ```
 
-## Edge Thesis
+Your wallet needs USDC + small amount of MATIC on Polygon network.
 
-Retail participants in temperature ladder markets use crude heuristics (anchor to
-current weather, round-number bias, recency bias). Meanwhile, NOAA/NWS forecasts
-achieve ~90% accuracy at 5 days and 1-2°F precision in the final 24-72 hours.
+## VPS Deployment (24/7)
 
-The bot converts forecast distributions into bucket probabilities using a Gaussian
-model, compares against market prices, and trades when expected value exceeds
-configurable thresholds — capturing the systematic gap between forecast quality
-and retail pricing.
-
-## Risk Controls
-
-| Parameter | Default | Research Reference |
-|-----------|---------|-------------------|
-| Kelly fraction | 0.15 (15% of full Kelly) | §5.3: use 0.1–0.25 fractional |
-| Per-market cap | 3% of bankroll | §5.3: 2-5% per market |
-| Max position | $10 | §5.4: $5-30 per position |
-| Daily loss cap | $50 | §5.4: -3-5% shutdown |
-| Min EV threshold | 3% | §5.2: positive EV only |
-| Min edge | 8% | §5.2: meaningful edge |
-| Daily exposure cap | 30% of bankroll | §5.4: multi-market scaling |
-| Instability skip | >4°F swing | Adaptive: skip volatile |
-
-## Deployment (VPS)
+For uninterrupted trading, deploy on a VPS (DigitalOcean, Oracle Cloud free tier, etc.):
 
 ```bash
-# On Ubuntu VPS:
-sudo apt update && sudo apt install python3-pip python3-venv -y
+# Clone/copy code to VPS
+cd ~/polymarket-weather-bot
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install aiohttp python-dotenv
 
-# Run with systemd or screen/tmux:
-screen -S polybot
-python main.py
+# Create .env with your config
+cp .env.example .env
+nano .env
 
-# Or create a systemd service:
-# /etc/systemd/system/polymarket-bot.service
-# [Unit]
-# Description=Polymarket Weather Bot
-# After=network.target
-# [Service]
-# User=ubuntu
-# WorkingDirectory=/home/ubuntu/polymarket-weather-bot
-# ExecStart=/home/ubuntu/polymarket-weather-bot/venv/bin/python main.py
-# Restart=always
-# [Install]
-# WantedBy=multi-user.target
+# Set up systemd for auto-restart
+cat > /etc/systemd/system/weatherbot.service << 'EOF'
+[Unit]
+Description=Polymarket Weather Trading Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/root/polymarket-weather-bot
+ExecStart=/root/polymarket-weather-bot/venv/bin/python3 main.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable weatherbot
+systemctl start weatherbot
+
+# Check logs anytime
+journalctl -u weatherbot -f
 ```
 
-## Why This Setup Captures Edge
+## External APIs
 
-1. **Data advantage**: NWS forecasts are free, high-quality, and programmatically
-   accessible — most retail traders don't systematically consume them.
+| API | Purpose | Auth |
+|-----|---------|------|
+| NWS/NOAA (`api.weather.gov`) | Grid forecasts + station observations | Free, no key (needs User-Agent) |
+| METAR (`aviationweather.gov`) | Real-time airport weather, updates every 30-60 min | Free, no key |
+| OpenWeatherMap | Supplemental forecasts (optional) | Free tier 1000 calls/day, needs API key |
+| Polymarket Gamma API | Market discovery + prices | Free, no key |
+| Polymarket CLOB | Order placement + orderbook | Needs Polygon private key |
+| Telegram | Trade alerts | Needs bot token + chat ID |
 
-2. **Speed**: 2-minute scan cycle catches mispricing before manual traders or
-   slower bots can react, especially in the critical 24-72h window.
+## How the Bot Makes Money
 
-3. **Math**: Gaussian bucket probability model + Kelly sizing + EV thresholds
-   ensure only +EV trades are taken at appropriate sizes.
+The bot's edge comes from **knowing the weather better than the market**:
 
-4. **Scale**: 6 cities × 7 days × 10+ buckets = hundreds of opportunities per
-   scan cycle, with low correlation between markets.
+1. **Most Polymarket traders** use intuition, current weather, or basic forecasts
+2. **The bot** uses NWS grid forecasts, METAR aviation data, NOAA station observations, and ensemble blending
+3. **When the market prices a bucket at 7% but the bot calculates 25%**, it buys
+4. **When the market prices an extreme bucket at 15% but the bot calculates 0%**, it sells (buys NO)
+5. **Only one bucket wins per city per day** -- the SELL/NO bets on unlikely buckets win most often (10 out of 11 buckets lose each day)
 
-5. **Risk**: Conservative fractional Kelly + daily caps prevent catastrophic
-   drawdowns even with model error.
+## Version History
+
+- **v1**: Basic Gaussian model, flat Kelly (0.15x), flat edge threshold (8 cents), fire-and-forget orders
+- **v2**: Weather regime detection (inflates sigma for storms/fronts), confidence-adaptive Kelly, dynamic edge thresholds
+- **v3**: Fill tracking via PositionTracker, ensemble blending (NWS + OWM), stale order cancellation
+- **v3.1**: 8 robustness fixes -- cancel-replace cooldown, negation-aware regime detection, API retry/backoff, parse metrics, city-specific peak hours, OWM cache pruning, configurable fees, orderbook depth check
+- **v4**: 9 optimizations -- station-specific NOAA modeling, METAR aviation weather as 3rd ensemble source, seasonal sigma adjustment, time-decay capital allocation, correlated exposure caps, maker/taker fee optimization, adverse selection detection, Sharpe ratio tracking, capped adaptive Kelly
+- **v4.1**: Realistic dry-run simulator -- live orderbook matching, partial fills, slippage tracking, fill rate metrics
 
 ## License
 
-Private use only. Not financial advice. Use at your own risk.
+Private use only. Not financial advice. Trading involves risk of loss. Use at your own risk.

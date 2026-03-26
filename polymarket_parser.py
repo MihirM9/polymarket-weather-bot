@@ -244,6 +244,9 @@ class PolymarketParser:
             # The Gamma API doesn't reliably return all temperature markets in
             # pagination, but once we find one market from a ladder, we can
             # fetch its neighbors by scanning nearby IDs (they're sequential).
+            # We also scan a wider range to catch ladders that share NO seed
+            # markets with the initial discovery (e.g., different dates for
+            # the same city that happen to have nearby IDs).
             discovered_neg_ids = set()
             seed_ids: List[int] = []
             for mid, item in raw_markets.items():
@@ -256,11 +259,14 @@ class PolymarketParser:
                     pass
 
             if seed_ids:
-                # Scan a window around each seed ID to find sibling buckets
-                # Temperature ladders typically have 8-15 buckets with sequential IDs
+                # Scan a wide window around each seed ID to find sibling buckets
+                # AND adjacent ladders (different dates for same city).
+                # Temperature ladders have 8-15 buckets with sequential IDs,
+                # and different dates are often 11-15 IDs apart.
                 ids_to_check = set()
                 for seed in seed_ids:
-                    for offset_id in range(-15, 16):
+                    # Wide scan: ±50 covers ~3-4 adjacent ladders
+                    for offset_id in range(-50, 51):
                         ids_to_check.add(seed + offset_id)
                 # Remove IDs we already have
                 existing_ids = set()

@@ -368,11 +368,17 @@ class PositionTracker:
         return sum(self._fill_speeds) / len(self._fill_speeds)
 
     def has_active_order(self, market_id: str, outcome_label: str) -> bool:
-        """Check if there's already an active (non-terminal) order for this market+bucket."""
+        """Check if there's already ANY order (active OR filled) for this market+bucket.
+
+        Prevents duplicate entries: once we've traded a bucket, don't re-enter it.
+        This fixes dry-run mode where filled orders become terminal immediately,
+        causing the dedup check to miss them and place duplicate trades.
+        """
         for order in self._orders.values():
-            if (not order.is_terminal
-                    and order.market_id == market_id
-                    and order.outcome_label == outcome_label):
+            if (order.market_id == market_id
+                    and order.outcome_label == outcome_label
+                    and order.status != OrderStatus.CANCELLED
+                    and order.status != OrderStatus.FAILED):
                 return True
         return False
 

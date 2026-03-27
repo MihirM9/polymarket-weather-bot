@@ -266,6 +266,11 @@ class DecisionEngine:
                     logger.debug(f"Skipping cooled-down outcome: {outcome.outcome_label}")
                     continue
 
+                # Skip outcomes that already have an active order (deduplication)
+                if tracker is not None and tracker.has_active_order(mkt.market_id, outcome.outcome_label):
+                    logger.debug(f"Skipping duplicate: active order exists for {outcome.outcome_label}")
+                    continue
+
                 # --- Evaluate BUY YES side ---
                 ev_y = _ev_yes(p_true, price_yes, fee=cfg.maker_fee_rate)
                 edge_y = p_true - price_yes

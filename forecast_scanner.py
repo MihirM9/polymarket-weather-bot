@@ -104,10 +104,11 @@ def bucket_probabilities(
         cdf_hi = _normal_cdf(hi, forecast_high, sigma) if hi is not None else 1.0
         probs[i] = max(0.0, cdf_hi - cdf_lo)
 
-    # Normalize (should already sum to ~1, but guard floating point)
-    total = sum(probs.values())
-    if total > 0:
-        probs = {k: v / total for k, v in probs.items()}
+    # Do NOT normalize. Raw Gaussian CDF probabilities are correct.
+    # Normalization caused a critical bug: when Polymarket only lists partial
+    # buckets (e.g., upper tail only), normalizing inflates probabilities.
+    # Example: forecast 68°F, only buckets 70°F+ listed → raw P(70-72)=7.5%,
+    # but after normalizing over just those buckets → 97%! (fake edge)
     return probs
 
 

@@ -49,6 +49,7 @@ from ensemble_blender import EnsembleBlender, ForecastPoint
 from position_tracker import PositionTracker
 from execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
 from metar_fetcher import MetarFetcher
+from resolution_tracker import ResolutionTracker
 
 # ── Logging ──
 
@@ -86,6 +87,7 @@ async def run_scan_cycle(
     telegram: TelegramAlerter,
     trade_logger: TradeLogger,
     metar_fetcher: MetarFetcher,
+    resolution_tracker: ResolutionTracker,
     cycle_count: int = 0,
 ) -> int:
     cycle_start = datetime.now(timezone.utc)
@@ -220,13 +222,14 @@ async def run_scan_cycle(
 
 async def main():
     logger.info("=" * 60)
-    logger.info("  Polymarket Weather Trading Bot v3")
+    logger.info("  Polymarket Weather Trading Bot v5")
     logger.info(f"  Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}")
     logger.info(f"  Bankroll: ${cfg.bankroll:.0f}")
     logger.info(f"  Cities: {', '.join(cfg.cities)}")
     logger.info(f"  Scan interval: {cfg.scan_interval_sec}s")
     logger.info(f"  Ensemble blending: {'enabled' if EnsembleBlender().enabled else 'disabled (no OWM key)'}")
     logger.info(f"  Fill tracking: enabled")
+    logger.info(f"  Resolution tracking: enabled")
     logger.info("=" * 60)
 
     # Initialize all components
@@ -240,17 +243,20 @@ async def main():
     trade_logger = TradeLogger()
     perf_tracker = PerformanceTracker()
     metar_fetcher = MetarFetcher()
+    resolution_tracker = ResolutionTracker()
 
     await telegram.send(
-        f"*Bot Started v3* ({'LIVE' if cfg.is_live else 'DRY-RUN'})\n"
+        f"*Bot Started v5* ({'LIVE' if cfg.is_live else 'DRY-RUN'})\n"
         f"Bankroll: ${cfg.bankroll:.0f}\n"
-        f"Ensemble: {'NWS+OWM' if blender.enabled else 'NWS only'}\n"
-        f"Fill tracking: active\n"
+        f"Ensemble: {'NWS+OWM+METAR' if blender.enabled else 'NWS+METAR'}\n"
+        f"Resolution tracking: active\n"
+        f"{resolution_tracker.get_pnl_summary()}\n"
         f"Scan every {cfg.scan_interval_sec}s"
     )
 
     total_trades = 0
     cycle_count = 0
+    last_summary_date: Optional[date_type] = None
 
     while not shutdown_event.is_set():
         try:
@@ -258,14 +264,47 @@ async def main():
             executed = await run_scan_cycle(
                 scanner, blender, parser, engine, executor,
                 tracker, telegram, trade_logger, metar_fetcher,
+                resolution_tracker,
                 cycle_count=cycle_count,
             )
             total_trades += executed
 
-            if cycle_count % 50 == 0:
-                perf_tracker.record_daily_pnl(engine.daily_pnl, cfg.bankroll)
-                await telegram.daily_summary(engine.daily_pnl, total_trades, tracker)
+            # Resolution check: every 10 cycles (~20 min), score past-date trades
+            if cycle_count % 10 == 0:
+                try:
+                    from execution import TRADE_LOG
+                    newly_resolved = await resolution_tracker.resolve_pending_trades(TRADE_LOG)
+                    if newly_resolved:
+                        # Feed real P&L into decision engine
+                        for t in newly_resolved:
+                            engine.update_pnl(t.pnl)
+                            perf_tracker.record_trade_return(t.pnl, t.size_usd)
+                        # Send Telegram alert for resolved trades
+                        await telegram.resolution_alert(newly_resolved)
+                        logger.info(
+                            f"Resolved {len(newly_resolved)} trades this cycle. "
+                            f"{resolution_tracker.get_pnl_summary()}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Resolution check error: {e}")
+
+            # Daily summary: once per day (when the date changes)
+            today = date_type.today()
+            if last_summary_date != today and cycle_count > 1:
+                last_summary_date = today
+                perf_tracker.record_daily_pnl(
+                    resolution_tracker.state.total_pnl, cfg.bankroll
+                )
+                await telegram.daily_summary(
+                    resolution_tracker.state.total_pnl,
+                    total_trades,
+                    tracker,
+                    resolution_summary=resolution_tracker.get_pnl_summary(),
+                    recent_results=resolution_tracker.get_recent_results(5),
+                )
                 logger.info(f"Performance: {perf_tracker.get_summary()}")
+                # Reset daily trade counter
+                total_trades = 0
 
         except Exception as e:
             logger.exception(f"Scan cycle error: {e}")
@@ -279,9 +318,9 @@ async def main():
 
     logger.info("Bot shutting down...")
     await telegram.send(
-        f"*Bot Stopped v3*\n"
-        f"Total trades: {total_trades}\n"
-        f"PnL: ${engine.daily_pnl:+.2f}\n"
+        f"*Bot Stopped v5*\n"
+        f"Session trades: {total_trades}\n"
+        f"{resolution_tracker.get_pnl_summary()}\n"
         f"{tracker.get_exposure_summary()}\n"
         f"{perf_tracker.get_summary()}"
     )

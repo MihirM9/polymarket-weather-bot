@@ -364,6 +364,15 @@ class PositionTracker:
             return 0.0
         return sum(self._fill_speeds) / len(self._fill_speeds)
 
+    def has_active_order(self, market_id: str, outcome_label: str) -> bool:
+        """Check if there's already an active (non-terminal) order for this market+bucket."""
+        for order in self._orders.values():
+            if (not order.is_terminal
+                    and order.market_id == market_id
+                    and order.outcome_label == outcome_label):
+                return True
+        return False
+
     def get_exposure_summary(self) -> str:
         adv_sel = f", adv_sel={self.adverse_selection_rate:.0%}" if self._total_fills > 0 else ""
         fill_spd = f", avg_fill={self.avg_fill_speed:.0f}s" if self._fill_speeds else ""

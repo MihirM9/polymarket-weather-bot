@@ -80,13 +80,34 @@ class TelegramAlerter:
         await self.send(msg)
 
     async def daily_summary(self, daily_pnl: float, trade_count: int,
-                             tracker: PositionTracker):
+                             tracker: PositionTracker,
+                             resolution_summary: str = "",
+                             recent_results: str = ""):
         msg = (
             f"*Daily Summary* ({date.today().isoformat()})\n"
-            f"PnL: ${daily_pnl:+.2f}\n"
-            f"Trades: {trade_count}\n"
+            f"{resolution_summary}\n"
+            f"Today's orders: {trade_count}\n"
             f"{tracker.get_exposure_summary()}\n"
             f"Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}"
+        )
+        if recent_results:
+            msg += f"\n\n*Recent Results:*\n{recent_results}"
+        await self.send(msg)
+
+    async def resolution_alert(self, resolved_trades):
+        """Send alert when trades are resolved with actual results."""
+        if not resolved_trades:
+            return
+        lines = []
+        for t in resolved_trades:
+            icon = "+" if t.won else "-"
+            lines.append(
+                f"  [{icon}] {t.side} {t.bucket_label} {t.city} "
+                f"→ {t.actual_high_f:.0f}°F ${t.pnl:+.2f}"
+            )
+        msg = (
+            f"*Trades Resolved* ({len(resolved_trades)})\n"
+            + "\n".join(lines)
         )
         await self.send(msg)
 

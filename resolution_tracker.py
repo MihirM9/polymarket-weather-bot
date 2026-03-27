@@ -159,13 +159,15 @@ class ResolutionTracker:
             logger.warning(f"No NOAA station configured for {city}")
             return None
 
-        # Fetch observations for the target date (start of day to end of day UTC)
-        # NWS observations API: /stations/{station}/observations
-        # with start/end parameters in ISO 8601 format
-        start = datetime(
+        # Fetch observations covering the full local day (midnight to midnight).
+        # Convert city local midnight to UTC using the city's offset.
+        offset_hours = cfg.CITY_UTC_OFFSETS.get(city, -5)
+        # Local midnight = UTC midnight - offset (e.g., EST midnight = 5 AM UTC)
+        local_midnight_utc = datetime(
             target_date.year, target_date.month, target_date.day,
-            6, 0, tzinfo=timezone.utc  # Start 6 AM UTC (covers overnight)
-        )
+            0, 0, tzinfo=timezone.utc
+        ) - timedelta(hours=offset_hours)
+        start = local_midnight_utc
         end = start + timedelta(hours=24)
 
         url = (
@@ -341,7 +343,6 @@ class ResolutionTracker:
         if not trades_csv.exists():
             return []
 
-        today = date.today()
         newly_resolved: List[ResolvedTrade] = []
 
         # Parse trades.csv to find unresolved trades
@@ -362,8 +363,10 @@ class ResolutionTracker:
                     except ValueError:
                         continue
 
-                    # Only resolve past dates (need at least 1 day for full observations)
-                    if market_date >= today:
+                    # Only resolve if the market day is fully complete for this city
+                    # (past 6 AM local time the next day — ensures all observations are in)
+                    city = row.get("city", "")
+                    if not cfg.is_market_day_complete(city, market_date):
                         continue
 
                     unresolved.append(row)
@@ -412,10 +415,15 @@ class ResolutionTracker:
             order_id = row.get("order_id", "")
             side = row.get("side", "BUY")
             price = float(row.get("price_limit", row.get("market_price", "0")))
-            size_usd = float(row.get("filled_usd", row.get("intended_usd", "0")))
+
+            # Use intended_usd as the position size, NOT filled_usd.
+            # filled_usd is written at order placement time and is $0 for maker
+            # orders that fill later. The CSV is never updated after fills.
+            # For P&L scoring, intended_usd represents the actual risk.
+            size_usd = float(row.get("intended_usd", "0"))
 
             if size_usd <= 0:
-                continue  # unfilled order, nothing to score
+                continue  # no position to score
 
             resolved = self.score_trade(
                 order_id=order_id,

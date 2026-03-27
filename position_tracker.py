@@ -265,10 +265,13 @@ class PositionTracker:
         return changed
 
     async def _cancel_stale_orders(self) -> int:
-        """Cancel orders that have been pending too long without filling."""
+        """Cancel orders that have been pending/partial too long without filling."""
         cancelled = 0
         for order_id, order in list(self._orders.items()):
-            if order.status != OrderStatus.PENDING:
+            # Cancel both PENDING and PARTIAL orders that are stale.
+            # Partial orders have unfilled portions that sit on the book
+            # indefinitely if not cleaned up.
+            if order.status not in (OrderStatus.PENDING, OrderStatus.PARTIAL):
                 continue
             if order.age_seconds > self.ORDER_TTL_SEC:
                 try:

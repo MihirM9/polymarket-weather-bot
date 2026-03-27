@@ -230,7 +230,12 @@ class DryRunSimulator:
         # If is_maker=True but the price would cross, treat as taker
         # (the CLOB would match it immediately)
         if is_maker and not would_cross:
-            intended_shares = intended_size_usd / limit_price if limit_price > 0 else 0.0
+            # SELL YES: risk per share = (1 - price), so shares = usd / (1 - price)
+            # BUY YES: cost per share = price, so shares = usd / price
+            if side == "SELL":
+                intended_shares = intended_size_usd / (1.0 - limit_price) if limit_price < 1.0 else 0.0
+            else:
+                intended_shares = intended_size_usd / limit_price if limit_price > 0 else 0.0
             sim = self._estimate_maker_fill(
                 snapshot, side, limit_price, intended_size_usd, intended_shares
             )
@@ -374,8 +379,7 @@ class DryRunSimulator:
 
         fill_prob = min(0.70, base_fill_prob * queue_factor)
 
-        # Apply a floor — even well-placed orders might not fill in illiquid markets
-        fill_prob = max(0.05, fill_prob)
+        # No artificial floor — broken orders should show 0% fill, not 5%
 
         # Estimate fill cycles (inverse of probability, with floor)
         # More competitive orders fill faster
@@ -390,7 +394,11 @@ class DryRunSimulator:
 
         # Simulated fill amount (probabilistic partial fill)
         filled_shares = intended_shares * fill_prob
-        filled_usd = filled_shares * limit_price
+        # SELL YES: collateral per share = (1 - price), BUY YES: cost = price
+        if side == "SELL":
+            filled_usd = filled_shares * (1.0 - limit_price)
+        else:
+            filled_usd = filled_shares * limit_price
 
         # Maker orders fill at limit price (no slippage), but we add a tiny
         # conservative buffer for price uncertainty

@@ -311,7 +311,16 @@ class DecisionEngine:
                 if ev_n > time_adj_ev_threshold and edge_n > dynamic_edge:
                     size = self._size_position(kelly_n, tracker, city=mkt.city)
                     if size > 0:
-                        price_no = 1.0 - price_yes
+                        # SELL = sell YES tokens. Limit price is the YES price
+                        # we're willing to sell at (near market), NOT the NO price.
+                        # Sell above our estimate of true value, near current market.
+                        sell_limit = max(price_yes - 0.02, p_true + 0.02)
+                        # Sanity: never sell YES above 50¢ when betting NO
+                        if sell_limit > 0.50:
+                            logger.debug(
+                                f"SELL limit {sell_limit:.3f} > 0.50 for {outcome.outcome_label}, skipping"
+                            )
+                            continue
                         signals.append(TradeSignal(
                             market_id=mkt.market_id,
                             city=mkt.city,
@@ -325,7 +334,7 @@ class DecisionEngine:
                             edge=edge_n,
                             kelly_fraction=kelly_n,
                             position_size_usd=size,
-                            price_limit=max(price_no + 0.02, (1.0 - p_true) - 0.02),
+                            price_limit=sell_limit,
                             rationale=(
                                 f"BUY NO (sell extreme): p_true={p_true:.3f}, mkt_yes={price_yes:.3f}, "
                                 f"edge_no={edge_n:.3f} (thresh={dynamic_edge:.3f}), EV={ev_n:.3f}, "

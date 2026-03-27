@@ -102,9 +102,44 @@ class Config:
                 city_name, station = pair.split(":", 1)
                 self.noaa_stations[city_name.strip()] = station.strip()
 
+    # City timezone UTC offsets (hours). Used for determining local date
+    # and resolution timing. Negative = behind UTC.
+    # These use standard time; DST adds +1 but we use a conservative buffer anyway.
+    CITY_UTC_OFFSETS: Dict[str, int] = field(default_factory=lambda: {
+        "New York": -5,
+        "Chicago": -6,
+        "Los Angeles": -8,
+        "Miami": -5,
+        "Houston": -6,
+        "Dallas": -6,
+    })
+
     @property
     def is_live(self) -> bool:
         return self.mode.lower() == "live"
+
+    def city_local_date(self, city: str) -> "date":
+        """Get the current local date for a city (accounts for UTC offset)."""
+        from datetime import datetime, timezone, timedelta
+        offset_hours = self.CITY_UTC_OFFSETS.get(city, -5)  # default EST
+        local_now = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
+        return local_now.date()
+
+    def is_market_day_complete(self, city: str, market_date: "date") -> bool:
+        """
+        Check if a market date is fully complete for a city.
+        Returns True only if it's past 6 AM local time the NEXT day,
+        ensuring all observations for the market date are in.
+        """
+        from datetime import datetime, timezone, timedelta
+        offset_hours = self.CITY_UTC_OFFSETS.get(city, -5)
+        local_now = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
+        # Market day is complete after 6 AM local the next day
+        next_day_6am = datetime(
+            market_date.year, market_date.month, market_date.day,
+            6, 0, tzinfo=timezone.utc
+        ) + timedelta(days=1) - timedelta(hours=offset_hours)
+        return datetime.now(timezone.utc) >= next_day_6am
 
 
 # Singleton

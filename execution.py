@@ -450,7 +450,14 @@ class OrderExecutor:
             side = BUY if signal.side == "BUY" else SELL
             maker_price = self._get_maker_price(signal)
             price = maker_price if maker_price is not None else signal.price_limit
-            size = signal.position_size_usd / price if price > 0 else 0
+
+            # Size calculation differs by side:
+            # BUY YES: cost per share = price → shares = usd / price
+            # SELL YES (bet NO): risk per share = (1 - price) → shares = usd / (1 - price)
+            if signal.side == "SELL":
+                size = signal.position_size_usd / (1.0 - price) if price < 1.0 else 0
+            else:
+                size = signal.position_size_usd / price if price > 0 else 0
 
             order_args = OrderArgs(
                 token_id=signal.token_id,

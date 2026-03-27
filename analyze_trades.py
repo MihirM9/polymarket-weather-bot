@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import aiohttp
 from api_utils import fetch_with_retry
+from config import cfg
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _station_cache: Dict[str, str] = {}
 class Trade:
     timestamp: str; mode: str; city: str; market_date: date; outcome: str
     side: str; p_true: float; market_price: float; ev: float
-    price_limit: float; filled_usd: float
+    price_limit: float; size_usd: float
     bucket_lo: Optional[float] = None; bucket_hi: Optional[float] = None
     actual_temp: Optional[float] = None; win: Optional[bool] = None
     pnl: Optional[float] = None
@@ -64,14 +65,16 @@ def load_trades() -> List[Trade]:
     trades: List[Trade] = []
     with open(TRADE_LOG, newline="") as f:
         for row in csv.DictReader(f):
-            filled = float(row.get("filled_usd", 0))
-            if filled <= 0: continue
+            # Use intended_usd (what we asked to spend), not filled_usd
+            # (which is $0 at placement time for maker orders — CSV is write-once)
+            size = float(row.get("intended_usd", 0) or row.get("filled_usd", 0))
+            if size <= 0: continue
             lo, hi = parse_bucket(row["outcome"])
             trades.append(Trade(
                 row["timestamp"], row["mode"], row["city"],
                 date.fromisoformat(row["market_date"]), row["outcome"],
                 row["side"], float(row["p_true"]), float(row["market_price"]),
-                float(row["ev"]), float(row["price_limit"]), filled, lo, hi))
+                float(row["ev"]), float(row["price_limit"]), size, lo, hi))
     return trades
 
 
@@ -101,12 +104,19 @@ async def get_station(session: aiohttp.ClientSession, city: str) -> Optional[str
 
 
 async def get_observed_high(session: aiohttp.ClientSession, station: str,
-                            obs_date: date) -> Optional[float]:
+                            obs_date: date, city: str = "") -> Optional[float]:
     """Fetch the observed daily high temperature (°F) from NWS observations."""
-    start = datetime(obs_date.year, obs_date.month, obs_date.day, 6, 0, tzinfo=timezone.utc)
+    # Use city-local midnight-to-midnight window, not hardcoded 6AM UTC.
+    # NYC midnight = 5AM UTC, LA midnight = 8AM UTC.
+    offset_hours = cfg.CITY_UTC_OFFSETS.get(city, -5)
+    local_midnight_utc = datetime(
+        obs_date.year, obs_date.month, obs_date.day,
+        0, 0, tzinfo=timezone.utc
+    ) - timedelta(hours=offset_hours)
+    start = local_midnight_utc
     end = start + timedelta(hours=24)
     url = (f"https://api.weather.gov/stations/{station}/observations"
-           f"?start={start.isoformat()}&end={end.isoformat()}")
+           f"?start={start.isoformat().replace('+00:00', 'Z')}&end={end.isoformat().replace('+00:00', 'Z')}")
     data = await fetch_with_retry(session, url, headers=NWS_HEADERS, label="nws-obs")
     if not data: return None
     max_f: Optional[float] = None
@@ -124,19 +134,26 @@ def evaluate_trade(t: Trade) -> None:
     in_bucket = t.bucket_lo <= t.actual_temp <= t.bucket_hi
     if t.side == "BUY":
         t.win = in_bucket
-        t.pnl = (t.filled_usd / t.price_limit - t.filled_usd) if t.win else -t.filled_usd
-    else:  # SELL No — win if NOT in bucket
+        # BUY YES: spend size_usd to buy size_usd/price shares, each pays $1 on win
+        shares = t.size_usd / t.price_limit if t.price_limit > 0 else 0
+        t.pnl = (shares - t.size_usd) if t.win else -t.size_usd
+    else:  # SELL YES = bet NO — win if NOT in bucket
         t.win = not in_bucket
-        t.pnl = (t.filled_usd / (1 - t.price_limit) - t.filled_usd) if t.win else -t.filled_usd
+        # SELL YES: collateral per share = (1 - price_yes), shares = size_usd / (1 - price)
+        collateral_per_share = 1.0 - t.price_limit
+        shares = t.size_usd / collateral_per_share if collateral_per_share > 0 else 0
+        # Win: keep collateral + receive price_yes per share; Loss: lose collateral
+        t.pnl = (shares * t.price_limit) if t.win else -t.size_usd
 
 
 async def main() -> None:
     trades = load_trades()
     if not trades:
         print("No filled trades found in log."); return
-    today = date.today()
-    resolved = [t for t in trades if t.market_date < today]
-    unresolved = [t for t in trades if t.market_date >= today]
+    # Use city-aware resolution: a trade is resolved when market day is complete
+    # in the city's local timezone, not just when UTC date passes
+    resolved = [t for t in trades if cfg.is_market_day_complete(t.city, t.market_date)]
+    unresolved = [t for t in trades if not cfg.is_market_day_complete(t.city, t.market_date)]
     print(f"\nLoaded {len(trades)} filled trades "
           f"({len(resolved)} resolved, {len(unresolved)} pending)\n")
     if not resolved:
@@ -148,7 +165,7 @@ async def main() -> None:
             station = await get_station(session, t.city)
             if not station:
                 logger.warning(f"No station for {t.city}"); continue
-            t.actual_temp = await get_observed_high(session, station, t.market_date)
+            t.actual_temp = await get_observed_high(session, station, t.market_date, t.city)
             if t.actual_temp is None:
                 logger.warning(f"No obs data for {t.city} on {t.market_date}")
 
@@ -169,7 +186,7 @@ async def main() -> None:
             evaluated += 1
             if t.win: wins += 1
             else: losses += 1
-            total_pnl += t.pnl or 0; total_ev += t.ev * t.filled_usd
+            total_pnl += t.pnl or 0; total_ev += t.ev * t.size_usd
         else:
             res, pnl_s = "???", "N/A"
         print(f"{t.city:<14} {t.market_date!s:<12} {bkt:<16} {t.side:<5} "
@@ -182,7 +199,7 @@ async def main() -> None:
     print(f"  Successfully evaluated: {evaluated}")
     print(f"  Unresolved (future):    {len(unresolved)}")
     if evaluated > 0:
-        cost_basis = sum(t.filled_usd for t in resolved if t.win is not None)
+        cost_basis = sum(t.size_usd for t in resolved if t.win is not None)
         print(f"  Wins / Losses:          {wins} / {losses}  ({wins/evaluated*100:.1f}% win rate)")
         print(f"  Total P&L:              ${total_pnl:+.2f}")
         print(f"  Avg P&L per trade:      ${total_pnl/evaluated:+.2f}")

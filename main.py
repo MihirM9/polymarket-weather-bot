@@ -134,9 +134,13 @@ async def run_scan_cycle(
     metar_observations = await metar_fetcher.fetch_all()
 
     # Fetch NOAA station observations for same-day markets (v4: station-specific)
+    # Use city-local date, not UTC date, to avoid "night blindness" where
+    # the UTC date advances at 8 PM EST / 4 PM PST
     station_observations: dict = {}
-    today = date_type.today()
-    same_day_cities = set(fc.city for fc in forecasts if fc.forecast_date == today)
+    same_day_cities = set(
+        fc.city for fc in forecasts
+        if fc.forecast_date == cfg.city_local_date(fc.city)
+    )
     if same_day_cities:
         async with aiohttp.ClientSession() as session:
             for city in same_day_cities:
@@ -152,27 +156,44 @@ async def run_scan_cycle(
         owm_point = owm_forecasts.get(key)
         supplemental = [owm_point] if owm_point else []
 
-        # For same-day forecasts, add METAR and station observations as ensemble sources
-        if fc.forecast_date == today:
-            # METAR observation (v4: aviation weather ground truth)
+        # For same-day forecasts, use METAR and station observations as a floor
+        # and sigma signal — NOT as daily high forecasts to average.
+        # Current temp is an instantaneous reading (e.g., 60°F at 8 AM),
+        # not a prediction of the daily high (e.g., 88°F). Averaging them
+        # would systematically drag the forecast toward current conditions,
+        # producing catastrophically wrong predictions during cool mornings
+        # and evenings.
+        if fc.forecast_date == cfg.city_local_date(fc.city):
+            # Collect current observations
+            current_temps = []
             metar_obs = metar_observations.get(fc.city)
             if metar_obs:
-                supplemental.append(ForecastPoint(
-                    source="metar",
-                    high_f=metar_obs.temp_f,
-                    sigma=0.5,
-                    weight=1.5,
-                ))
-
-            # NOAA station observation (v4: station-specific ground truth)
+                current_temps.append(metar_obs.temp_f)
             station_temp = station_observations.get(fc.city)
             if station_temp is not None:
-                supplemental.append(ForecastPoint(
-                    source="noaa_station",
-                    high_f=station_temp,
-                    sigma=0.5,
-                    weight=1.5,
-                ))
+                current_temps.append(station_temp)
+
+            if current_temps:
+                max_observed = max(current_temps)
+
+                # Floor: if current temp already exceeds forecast, raise it
+                if max_observed > fc.high_f:
+                    logger.info(
+                        f"Observed temp {max_observed:.0f}°F > forecast "
+                        f"{fc.high_f:.0f}°F for {fc.city} — raising floor"
+                    )
+                    fc.high_f = max_observed
+                    fc.sigma = max(fc.sigma, 1.5)  # widen sigma, forecast was wrong
+
+                # Sigma signal: large divergence means more uncertainty
+                divergence = abs(fc.high_f - max_observed)
+                if divergence > 10:
+                    sigma_boost = 1.0 + (divergence - 10) * 0.05
+                    fc.sigma *= sigma_boost
+                    logger.info(
+                        f"Large obs/forecast divergence ({divergence:.0f}°F) "
+                        f"for {fc.city} — σ boosted to {fc.sigma:.1f}"
+                    )
 
         ensemble = blender.blend(fc.high_f, fc.sigma, supplemental)
 

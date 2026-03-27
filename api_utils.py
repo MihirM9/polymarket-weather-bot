@@ -44,7 +44,18 @@ async def fetch_with_retry(
         try:
             async with session.get(url, headers=headers, timeout=timeout) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    # Guard against HTML maintenance pages returned as 200 OK.
+                    # NWS frequently returns 200 + HTML instead of JSON during
+                    # maintenance. We must catch the parse error and retry.
+                    try:
+                        return await resp.json()
+                    except (aiohttp.ContentTypeError, ValueError) as e:
+                        logger.warning(
+                            f"[{label}] JSON parse error on 200 OK "
+                            f"(attempt {attempt}/{max_retries}): {e}"
+                        )
+                        # Fall through to retry logic below
+                        continue
 
                 # 4xx — don't retry, it's a client error
                 if 400 <= resp.status < 500:

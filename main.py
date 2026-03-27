@@ -276,8 +276,10 @@ async def main():
     )
 
     total_trades = 0
+    hourly_trades = 0
     cycle_count = 0
     last_summary_date: Optional[date_type] = None
+    last_hourly_summary: datetime = datetime.now(timezone.utc)
 
     while not shutdown_event.is_set():
         try:
@@ -289,6 +291,19 @@ async def main():
                 cycle_count=cycle_count,
             )
             total_trades += executed
+            hourly_trades += executed
+
+            # Hourly summary: every 60 minutes
+            now = datetime.now(timezone.utc)
+            if (now - last_hourly_summary).total_seconds() >= 3600:
+                await telegram.hourly_summary(
+                    hourly_trades, total_trades, tracker,
+                    resolution_summary=resolution_tracker.get_pnl_summary(),
+                    cycle_count=cycle_count,
+                )
+                logger.info(f"Hourly summary sent: {hourly_trades} trades this hour")
+                hourly_trades = 0
+                last_hourly_summary = now
 
             # Resolution check: every 10 cycles (~20 min), score past-date trades
             if cycle_count % 10 == 0:

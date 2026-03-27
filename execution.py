@@ -120,6 +120,22 @@ class TelegramAlerter:
         )
         await self.send(msg)
 
+    async def hourly_summary(self, hourly_trades: int, total_trades_today: int,
+                              tracker: PositionTracker,
+                              resolution_summary: str = "",
+                              cycle_count: int = 0):
+        """Send hourly trade summary."""
+        now = datetime.now(timezone.utc)
+        msg = (
+            f"*Hourly Update* ({now.strftime('%H:%M')} UTC)\n"
+            f"Trades this hour: {hourly_trades}\n"
+            f"Trades today: {total_trades_today}\n"
+            f"{tracker.get_exposure_summary()}\n"
+            f"{resolution_summary}\n"
+            f"Cycles: {cycle_count} | Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}"
+        )
+        await self.send(msg)
+
     async def error_alert(self, error_msg: str):
         await self.send(f"*Error*: {error_msg}")
 

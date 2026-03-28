@@ -333,7 +333,16 @@ class PolymarketParser:
             if not market_date:
                 continue
 
+            # Detect unit from question first; if not found, check bucket labels
             unit = _detect_unit(question)
+            if unit == "F":
+                # Check if any sibling bucket label contains °C
+                for sib_check in siblings:
+                    gt = sib_check.get("groupItemTitle", "")
+                    sq = sib_check.get("question", "")
+                    if _detect_unit(gt) == "C" or _detect_unit(sq) == "C":
+                        unit = "C"
+                        break
 
             mkt = TemperatureMarket(
                 market_id=neg_risk_id,  # Use group ID as market ID
@@ -363,10 +372,17 @@ class PolymarketParser:
 
                 # Convert °C to °F if needed (bot forecasts in °F)
                 if unit == "C":
+                    lo_c, hi_c = lo, hi
                     if lo is not None:
                         lo = _celsius_to_fahrenheit(lo)
                     if hi is not None:
                         hi = _celsius_to_fahrenheit(hi)
+                    logger.info(
+                        f"Celsius conversion: {bucket_source} "
+                        f"({lo_c}-{hi_c}°C → {lo:.0f}-{hi:.0f}°F)"
+                        if lo is not None and hi is not None
+                        else f"Celsius conversion: {bucket_source} → lo={lo} hi={hi}"
+                    )
 
                 # Extract price — in binary markets, outcomePrices[0] is Yes price
                 outcome_prices = sib.get("outcomePrices", [])
@@ -419,7 +435,11 @@ class PolymarketParser:
             if not market_date:
                 continue
 
+            # Detect unit from question or bucket label
+            group_title_check = item.get("groupItemTitle", "")
             unit = _detect_unit(question)
+            if unit == "F" and group_title_check:
+                unit = _detect_unit(group_title_check)
 
             mkt = TemperatureMarket(
                 market_id=str(item.get("id", item.get("conditionId", ""))),

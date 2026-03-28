@@ -34,10 +34,14 @@ Architecture (v3):
 """
 
 import asyncio
+import csv
+import json
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, date as date_type, timezone
+from pathlib import Path
 
 import aiohttp
 
@@ -46,7 +50,7 @@ from forecast_scanner import ForecastScanner, CityForecast, compute_confidence
 from polymarket_parser import PolymarketParser
 from decision_engine import DecisionEngine
 from ensemble_blender import EnsembleBlender, ForecastPoint
-from position_tracker import PositionTracker
+from position_tracker import PositionTracker, OrderStatus
 from execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
 from metar_fetcher import MetarFetcher
 from resolution_tracker import ResolutionTracker
@@ -239,6 +243,121 @@ async def run_scan_cycle(
     return executed
 
 
+STATE_FILE = "/tmp/bot_state.json"
+
+def export_dashboard_state(
+    tracker: PositionTracker,
+    engine: DecisionEngine,
+    resolution_tracker: ResolutionTracker,
+    cycle_count: int,
+    start_time: datetime,
+):
+    """Write JSON snapshot for the dashboard to read."""
+    try:
+        orders = list(tracker._orders.values())
+        positions = [
+            {
+                "order_id": o.order_id,
+                "city": o.city,
+                "date": o.market_date.isoformat(),
+                "bucket": o.outcome_label,
+                "side": o.side,
+                "size": o.intended_size_usd,
+                "entry_price": o.limit_price,
+                "current_price": o.avg_fill_price or o.limit_price,
+                "filled_usd": o.filled_size_usd,
+                "status": o.status.value,
+            }
+            for o in orders if o.status.value not in ("cancelled", "failed")
+        ]
+        pending = [
+            {
+                "order_id": o.order_id,
+                "city": o.city,
+                "date": o.market_date.isoformat(),
+                "bucket": o.outcome_label,
+                "side": o.side,
+                "size": o.intended_size_usd,
+                "limit_price": o.limit_price,
+                "age_seconds": o.age_seconds,
+                "status": o.status.value,
+            }
+            for o in orders if o.status == OrderStatus.PENDING
+        ]
+
+        # Read recent trades from CSV
+        recent_trades = []
+        trade_log = Path("logs/trades.csv")
+        if trade_log.exists():
+            with open(trade_log) as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                for row in rows[-20:]:
+                    recent_trades.append({
+                        "timestamp": row.get("timestamp", ""),
+                        "city": row.get("city", ""),
+                        "date": row.get("market_date", ""),
+                        "bucket": row.get("outcome", ""),
+                        "side": row.get("side", ""),
+                        "price": row.get("price_limit", ""),
+                        "size": row.get("intended_usd", ""),
+                        "ev": row.get("ev", ""),
+                        "edge": row.get("edge", ""),
+                        "p_true": row.get("p_true", ""),
+                        "market_price": row.get("market_price", ""),
+                        "status": row.get("fill_status", ""),
+                        "is_maker": row.get("is_maker", ""),
+                    })
+
+        # Compute per-city exposure
+        city_exp = {}
+        for o in orders:
+            if not o.is_terminal:
+                city_exp[o.city] = city_exp.get(o.city, 0) + o.filled_size_usd + o.unfilled_usd
+
+        state = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "live" if cfg.is_live else "dry-run",
+            "cycle": cycle_count,
+            "uptime_seconds": (datetime.now(timezone.utc) - start_time).total_seconds(),
+            "bankroll": cfg.bankroll,
+            "daily_pnl": resolution_tracker.state.total_pnl,
+            "daily_loss_cap_used": abs(engine.daily_pnl) / cfg.daily_loss_cap if cfg.daily_loss_cap > 0 else 0,
+            "total_exposure": tracker.total_exposure,
+            "realized_exposure": tracker.realized_exposure,
+            "pending_exposure": tracker.pending_exposure,
+            "positions": positions,
+            "pending_orders": pending,
+            "recent_trades": recent_trades,
+            "exposure_by_city": city_exp,
+            "resolution": {
+                "total_pnl": resolution_tracker.state.total_pnl,
+                "wins": resolution_tracker.state.total_wins,
+                "losses": resolution_tracker.state.total_losses,
+                "win_rate": resolution_tracker.state.win_rate,
+                "trade_count": resolution_tracker.state.trade_count,
+            },
+            "adverse_selection": {
+                "instant_fill_rate": tracker.adverse_selection_rate,
+                "avg_fill_speed": tracker.avg_fill_speed,
+            },
+            "fill_stats": {
+                "total": tracker._total_fills,
+                "active": tracker.active_order_count,
+                "filled": tracker.filled_order_count,
+            },
+        }
+
+        # Atomic write: write to tmp then rename
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE_FILE)
+
+    except Exception as e:
+        logger.warning(f"Dashboard state export failed: {e}")
+
+
 # ── Main ──
 
 async def main():
@@ -280,6 +399,7 @@ async def main():
     cycle_count = 0
     last_summary_date: Optional[date_type] = None
     last_hourly_summary: datetime = datetime.now(timezone.utc)
+    start_time = datetime.now(timezone.utc)
 
     while not shutdown_event.is_set():
         try:
@@ -341,6 +461,11 @@ async def main():
                 logger.info(f"Performance: {perf_tracker.get_summary()}")
                 # Reset daily trade counter
                 total_trades = 0
+
+            export_dashboard_state(
+                tracker, engine, resolution_tracker,
+                cycle_count, start_time,
+            )
 
         except Exception as e:
             logger.exception(f"Scan cycle error: {e}")

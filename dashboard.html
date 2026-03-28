@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weather Bot Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0a0a; --card: #1a1a2e; --border: #0f0f23;
+  --green: #00ff41; --bright-green: #33ff33; --amber: #ffb000;
+  --red: #ff4444; --dim: #888; --text: #ccc;
+}
+body {
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--bg); color: var(--text);
+  font-size: 12px; line-height: 1.5;
+  min-height: 100vh;
+}
+/* scanline overlay */
+body::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 999;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+}
+
+/* ── Top Bar ── */
+.top-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #111118 0%, var(--bg) 100%);
+}
+.top-bar .label { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.top-bar .value { font-weight: 600; }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;
+}
+.badge-live { background: rgba(0,255,65,0.15); color: var(--green); border: 1px solid var(--green); animation: pulse-glow 2s ease-in-out infinite; }
+.badge-dry { background: rgba(255,176,0,0.15); color: var(--amber); border: 1px solid var(--amber); }
+.badge-stale { background: rgba(255,176,0,0.2); color: var(--amber); border: 1px solid var(--amber); margin-left: -8px; }
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 4px rgba(0,255,65,0.3); }
+  50% { box-shadow: 0 0 12px rgba(0,255,65,0.6); }
+}
+.metric { display: flex; flex-direction: column; gap: 1px; }
+.pnl-pos { color: var(--green); } .pnl-neg { color: var(--red); }
+
+/* ── Main Grid ── */
+.main-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 0; min-height: calc(100vh - 130px);
+}
+.panel {
+  border-right: 1px solid var(--border); padding: 12px;
+  overflow-y: auto; max-height: calc(100vh - 130px);
+}
+.panel:last-child { border-right: none; }
+.panel-title {
+  color: var(--bright-green); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 2px;
+  margin-bottom: 10px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Tables ── */
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+th {
+  text-align: left; color: var(--dim); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 4px 6px; border-bottom: 1px solid var(--border);
+  font-weight: 400; white-space: nowrap;
+}
+td { padding: 4px 6px; border-bottom: 1px solid rgba(15,15,35,0.5); white-space: nowrap; }
+tr:hover td { background: rgba(0,255,65,0.03); }
+
+.side-yes { color: var(--green); font-weight: 600; }
+.side-no { color: var(--red); font-weight: 600; }
+.spread-pos { color: var(--green); } .spread-neg { color: var(--red); }
+.status-badge {
+  display: inline-block; padding: 1px 5px; border-radius: 2px;
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+}
+.status-filled { background: rgba(0,255,65,0.15); color: var(--green); }
+.status-pending { background: rgba(255,176,0,0.15); color: var(--amber); }
+.status-partial { background: rgba(255,176,0,0.15); color: var(--amber); }
+.maker-badge { background: rgba(0,255,65,0.1); color: var(--green); padding: 1px 4px; border-radius: 2px; font-size: 9px; margin-left: 4px; }
+.empty-msg { color: var(--dim); font-style: italic; padding: 20px 0; text-align: center; }
+
+/* ── Edge bars ── */
+.edge-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; margin-bottom: 6px;
+}
+.edge-card .city { color: var(--bright-green); font-weight: 600; font-size: 11px; }
+.edge-card .bucket { color: var(--dim); font-size: 10px; }
+.edge-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; font-size: 10px; }
+.edge-bar-track { flex: 1; height: 6px; background: #111; border-radius: 3px; margin: 0 8px; overflow: hidden; }
+.edge-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.edge-high { background: var(--green); } .edge-mid { background: var(--amber); } .edge-low { background: var(--red); }
+
+/* ── Trade list ── */
+.trade-row {
+  display: grid; grid-template-columns: 50px 1fr 1fr auto auto auto;
+  gap: 6px; padding: 5px 0; border-bottom: 1px solid rgba(15,15,35,0.5);
+  font-size: 11px; align-items: center;
+}
+.trade-row:hover { background: rgba(0,255,65,0.03); }
+.trade-time { color: var(--dim); font-size: 10px; }
+
+/* ── Bottom Bar ── */
+.bottom-bar {
+  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 0; border-top: 1px solid var(--border);
+  background: linear-gradient(0deg, #111118 0%, var(--bg) 100%);
+}
+.bottom-section { padding: 10px 14px; border-right: 1px solid var(--border); }
+.bottom-section:last-child { border-right: none; }
+.bottom-label { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.bar-track { height: 8px; background: #111; border-radius: 4px; overflow: hidden; margin: 4px 0; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+.bar-green { background: var(--green); } .bar-amber { background: var(--amber); } .bar-red { background: var(--red); }
+.city-bar-label { display: flex; justify-content: space-between; font-size: 10px; margin-top: 3px; }
+.stat-row { display: flex; justify-content: space-between; font-size: 11px; margin: 3px 0; }
+.stat-val { font-weight: 600; }
+
+/* ── Error overlay ── */
+.error-banner {
+  display: none; position: fixed; top: 0; left: 0; right: 0;
+  background: rgba(255,68,68,0.15); color: var(--red);
+  text-align: center; padding: 8px; font-size: 11px; font-weight: 600;
+  border-bottom: 1px solid var(--red); z-index: 100;
+}
+.error-banner.visible { display: block; }
+
+/* ── Loss cap meter ── */
+.loss-meter { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.loss-pct { font-size: 11px; font-weight: 600; min-width: 36px; }
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .main-grid { grid-template-columns: 1fr; }
+  .panel { max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+  .bottom-bar { grid-template-columns: 1fr 1fr; }
+  .top-bar { gap: 10px; }
+}
+</style>
+</head>
+<body>
+
+<div class="error-banner" id="error-banner"></div>
+
+<div class="top-bar" id="top-bar">
+  <span class="badge badge-dry" id="mode-badge">---</span>
+  <span class="badge badge-stale" id="stale-badge" style="display:none">STALE</span>
+  <div class="metric"><span class="label">Uptime</span><span class="value" id="uptime">--</span></div>
+  <div class="metric"><span class="label">Cycle</span><span class="value" id="cycle">#--</span></div>
+  <div class="metric"><span class="label">Bankroll</span><span class="value" id="bankroll">$--</span></div>
+  <div class="metric"><span class="label">Exposure</span><span class="value" id="exposure">$-- (--% )</span></div>
+  <div class="metric"><span class="label">Daily PnL</span><span class="value" id="daily-pnl">$--</span></div>
+  <div class="metric">
+    <span class="label">Loss Cap</span>
+    <div class="loss-meter">
+      <div class="bar-track" style="width:80px"><div class="bar-fill bar-green" id="loss-bar" style="width:0%"></div></div>
+      <span class="loss-pct" id="loss-pct">0%</span>
+    </div>
+  </div>
+</div>
+
+<div class="main-grid">
+  <!-- Left: Open Positions -->
+  <div class="panel" id="positions-panel">
+    <div class="panel-title">Open Positions</div>
+    <div id="positions-content"><p class="empty-msg">Waiting for data...</p></div>
+  </div>
+  <!-- Center: Forecast Edge -->
+  <div class="panel" id="edge-panel">
+    <div class="panel-title">Forecast Edge</div>
+    <div id="edge-content"><p class="empty-msg">Waiting for data...</p></div>
+  </div>
+  <!-- Right: Recent Trades -->
+  <div class="panel" id="trades-panel">
+    <div class="panel-title">Recent Trades</div>
+    <div id="trades-content"><p class="empty-msg">Waiting for data...</p></div>
+  </div>
+</div>
+
+<div class="bottom-bar" id="bottom-bar">
+  <div class="bottom-section" id="city-exposure">
+    <div class="bottom-label">City Exposure</div>
+    <div id="city-bars"><span class="empty-msg" style="font-size:10px">No exposure</span></div>
+  </div>
+  <div class="bottom-section" id="fill-stats-section">
+    <div class="bottom-label">Fill Stats</div>
+    <div id="fill-stats"></div>
+  </div>
+  <div class="bottom-section" id="adverse-section">
+    <div class="bottom-label">Adverse Selection</div>
+    <div id="adverse-stats"></div>
+  </div>
+  <div class="bottom-section" id="resolution-section">
+    <div class="bottom-label">Resolution</div>
+    <div id="resolution-stats"></div>
+  </div>
+</div>
+
+<script>
+const POLL_INTERVAL = 3000;
+const STALE_THRESHOLD = 300;
+
+function $(id) { return document.getElementById(id); }
+function fmt(n, d=2) { return n != null && !isNaN(n) ? Number(n).toFixed(d) : '--'; }
+function fmtUsd(n) { return n != null && !isNaN(n) ? '$' + Number(n).toFixed(2) : '$--'; }
+function fmtPct(n) { return n != null && !isNaN(n) ? Number(n * 100).toFixed(1) + '%' : '--%'; }
+function fmtPrice(n) { return n != null && !isNaN(n) ? Number(n).toFixed(3) : '--'; }
+
+function formatUptime(seconds) {
+  if (!seconds) return '--';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function isStale(timestamp) {
+  if (!timestamp) return true;
+  const age = (Date.now() - new Date(timestamp).getTime()) / 1000;
+  return age > STALE_THRESHOLD;
+}
+
+function sideClass(side) {
+  return (side || '').toUpperCase() === 'YES' ? 'side-yes' : 'side-no';
+}
+
+function statusBadge(status) {
+  const s = (status || '').toLowerCase();
+  const cls = s === 'filled' ? 'status-filled' : 'status-pending';
+  return `<span class="status-badge ${cls}">${s || 'unknown'}</span>`;
+}
+
+function showError(msg) {
+  const el = $('error-banner');
+  el.textContent = msg;
+  el.classList.add('visible');
+}
+
+function hideError() {
+  $('error-banner').classList.remove('visible');
+}
+
+function updateTopBar(data) {
+  // Mode badge
+  const badge = $('mode-badge');
+  if (data.mode === 'live') {
+    badge.textContent = 'LIVE';
+    badge.className = 'badge badge-live';
+  } else {
+    badge.textContent = 'DRY-RUN';
+    badge.className = 'badge badge-dry';
+  }
+
+  // Stale
+  const stale = $('stale-badge');
+  stale.style.display = isStale(data.timestamp) ? 'inline-block' : 'none';
+
+  $('uptime').textContent = formatUptime(data.uptime_seconds);
+  $('cycle').textContent = '#' + (data.cycle || 0);
+  $('bankroll').textContent = fmtUsd(data.bankroll);
+
+  const expPct = data.bankroll > 0 ? (data.total_exposure / data.bankroll * 100).toFixed(1) : 0;
+  $('exposure').textContent = `${fmtUsd(data.total_exposure)} (${expPct}%)`;
+
+  const pnl = data.daily_pnl || 0;
+  const pnlEl = $('daily-pnl');
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + fmtUsd(pnl);
+  pnlEl.className = 'value ' + (pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
+
+  // Loss cap
+  const capUsed = Math.min((data.daily_loss_cap_used || 0) * 100, 100);
+  const lossBar = $('loss-bar');
+  lossBar.style.width = capUsed + '%';
+  lossBar.className = 'bar-fill ' + (capUsed < 50 ? 'bar-green' : capUsed < 80 ? 'bar-amber' : 'bar-red');
+  $('loss-pct').textContent = capUsed.toFixed(0) + '%';
+}
+
+function updatePositions(positions) {
+  const el = $('positions-content');
+  if (!positions || positions.length === 0) {
+    el.innerHTML = '<p class="empty-msg">No open positions</p>';
+    return;
+  }
+  let html = `<table><thead><tr>
+    <th>City</th><th>Date</th><th>Bucket</th><th>Side</th>
+    <th>Size</th><th>Entry</th><th>Current</th><th>Spread</th><th>Status</th>
+  </tr></thead><tbody>`;
+  for (const p of positions) {
+    const spread = (Number(p.current_price) - Number(p.entry_price));
+    const spreadCls = spread >= 0 ? 'spread-pos' : 'spread-neg';
+    html += `<tr>
+      <td>${p.city || '--'}</td>
+      <td>${(p.date || '').slice(5)}</td>
+      <td>${p.bucket || '--'}</td>
+      <td class="${sideClass(p.side)}">${(p.side||'').toUpperCase()}</td>
+      <td>${fmtUsd(p.size)}</td>
+      <td>${fmtPrice(p.entry_price)}</td>
+      <td>${fmtPrice(p.current_price)}</td>
+      <td class="${spreadCls}">${spread >= 0 ? '+' : ''}${fmtPrice(spread)}</td>
+      <td>${statusBadge(p.status)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function updateEdgePanel(trades, positions) {
+  const el = $('edge-content');
+  if (!trades || trades.length === 0) {
+    el.innerHTML = '<p class="empty-msg">No edge data yet</p>';
+    return;
+  }
+  // Deduplicate: latest trade per city+bucket
+  const seen = {};
+  for (const t of [...trades].reverse()) {
+    const key = (t.city || '') + '|' + (t.bucket || '');
+    if (!seen[key]) seen[key] = t;
+  }
+  const unique = Object.values(seen).slice(0, 10);
+  if (unique.length === 0) {
+    el.innerHTML = '<p class="empty-msg">No edge data yet</p>';
+    return;
+  }
+  let html = '';
+  for (const t of unique) {
+    const edge = Number(t.edge) || 0;
+    const ev = Number(t.ev) || 0;
+    const pTrue = Number(t.p_true) || 0;
+    const mktPrice = Number(t.market_price) || 0;
+    const barWidth = Math.min(Math.abs(edge) * 500, 100);
+    const barCls = Math.abs(edge) > 0.10 ? 'edge-high' : Math.abs(edge) > 0.05 ? 'edge-mid' : 'edge-low';
+    html += `<div class="edge-card">
+      <div style="display:flex;justify-content:space-between">
+        <span class="city">${t.city || '--'}</span>
+        <span class="bucket">${t.bucket || '--'}</span>
+      </div>
+      <div class="edge-row">
+        <span>P: ${fmtPrice(pTrue)}</span>
+        <span style="color:var(--dim)">vs</span>
+        <span>Mkt: ${fmtPrice(mktPrice)}</span>
+      </div>
+      <div class="edge-row">
+        <span>Edge</span>
+        <div class="edge-bar-track"><div class="edge-bar-fill ${barCls}" style="width:${barWidth}%"></div></div>
+        <span style="font-weight:600;color:${Math.abs(edge) > 0.10 ? 'var(--green)' : Math.abs(edge) > 0.05 ? 'var(--amber)' : 'var(--red)'}">${(edge >= 0 ? '+' : '') + fmt(edge, 3)}</span>
+      </div>
+      <div class="edge-row" style="color:var(--dim)">
+        <span>EV: ${(ev >= 0 ? '+' : '') + fmt(ev, 3)}</span>
+        <span>${(t.side||'').toUpperCase()}</span>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function updateRecentTrades(trades) {
+  const el = $('trades-content');
+  if (!trades || trades.length === 0) {
+    el.innerHTML = '<p class="empty-msg">No trades yet</p>';
+    return;
+  }
+  let html = '';
+  for (const t of [...trades].reverse()) {
+    const ts = (t.timestamp || '').split('T').pop() || '';
+    const timeStr = ts.length > 8 ? ts.slice(0, 8) : ts;
+    const makerTag = (t.is_maker === 'True' || t.is_maker === true) ? '<span class="maker-badge">MKR</span>' : '';
+    html += `<div class="trade-row">
+      <span class="trade-time">${timeStr}</span>
+      <span>${t.city || '--'}</span>
+      <span style="color:var(--dim);font-size:10px">${t.bucket || '--'}</span>
+      <span class="${sideClass(t.side)}">${(t.side||'').toUpperCase()}</span>
+      <span>${fmtPrice(t.price)} / ${fmtUsd(t.size)}</span>
+      <span>${statusBadge(t.status)}${makerTag}</span>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function updateBottomBar(data) {
+  // City exposure bars
+  const cityEl = $('city-bars');
+  const cityExp = data.exposure_by_city || {};
+  const cities = Object.keys(cityExp);
+  if (cities.length === 0) {
+    cityEl.innerHTML = '<span class="empty-msg" style="font-size:10px">No exposure</span>';
+  } else {
+    const maxExp = Math.max(...Object.values(cityExp), 1);
+    let html = '';
+    for (const city of cities.sort((a, b) => cityExp[b] - cityExp[a])) {
+      const pct = (cityExp[city] / maxExp * 100).toFixed(0);
+      html += `<div class="city-bar-label"><span>${city}</span><span>${fmtUsd(cityExp[city])}</span></div>
+        <div class="bar-track"><div class="bar-fill bar-green" style="width:${pct}%"></div></div>`;
+    }
+    cityEl.innerHTML = html;
+  }
+
+  // Fill stats
+  const fs = data.fill_stats || {};
+  $('fill-stats').innerHTML = `
+    <div class="stat-row"><span>Total fills</span><span class="stat-val">${fs.total || 0}</span></div>
+    <div class="stat-row"><span>Active</span><span class="stat-val">${fs.active || 0}</span></div>
+    <div class="stat-row"><span>Filled</span><span class="stat-val">${fs.filled || 0}</span></div>`;
+
+  // Adverse selection
+  const as = data.adverse_selection || {};
+  const ifr = as.instant_fill_rate || 0;
+  $('adverse-stats').innerHTML = `
+    <div class="stat-row"><span>Instant fill rate</span><span class="stat-val" style="color:${ifr > 0.3 ? 'var(--red)' : 'var(--green)'}">${fmtPct(ifr)}</span></div>
+    <div class="stat-row"><span>Avg fill speed</span><span class="stat-val">${fmt(as.avg_fill_speed || 0, 1)}s</span></div>`;
+
+  // Resolution
+  const r = data.resolution || {};
+  const wr = r.win_rate || 0;
+  $('resolution-stats').innerHTML = `
+    <div class="stat-row"><span>Record</span><span class="stat-val" style="color:var(--green)">${r.wins || 0}W</span> / <span class="stat-val" style="color:var(--red)">${r.losses || 0}L</span></div>
+    <div class="stat-row"><span>Win rate</span><span class="stat-val">${fmtPct(wr)}</span></div>
+    <div class="stat-row"><span>Total PnL</span><span class="stat-val ${(r.total_pnl||0) >= 0 ? 'pnl-pos' : 'pnl-neg'}">${(r.total_pnl||0) >= 0 ? '+' : ''}${fmtUsd(r.total_pnl)}</span></div>
+    <div class="stat-row"><span>Trades</span><span class="stat-val">${r.trade_count || 0}</span></div>`;
+}
+
+function updateDashboard(data) {
+  hideError();
+  updateTopBar(data);
+  updatePositions(data.positions);
+  updateEdgePanel(data.recent_trades, data.positions);
+  updateRecentTrades(data.recent_trades);
+  updateBottomBar(data);
+}
+
+async function fetchState() {
+  try {
+    const resp = await fetch('/api/state');
+    const data = await resp.json();
+    if (data.error) { showError(data.error); return; }
+    updateDashboard(data);
+  } catch (e) {
+    showError('Connection lost');
+  }
+}
+
+fetchState();
+setInterval(fetchState, POLL_INTERVAL);
+</script>
+</body>
+</html>

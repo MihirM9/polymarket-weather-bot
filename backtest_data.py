@@ -33,7 +33,18 @@ NWS_HEADERS = {
     "User-Agent": "(polymarket-weather-bot-backtest, contact@example.com)",
     "Accept": "application/geo+json",
 }
+NCEI_BASE = "https://www.ncei.noaa.gov/access/services/data/v1"
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+
+# GHCND station IDs for NCEI daily summaries (historical TMAX)
+GHCND_STATIONS = {
+    "New York": "USW00094728",
+    "Chicago": "USW00094846",
+    "Los Angeles": "USW00023174",
+    "Miami": "USW00012839",
+    "Houston": "USW00012960",
+    "Dallas": "USW00013911",
+}
 
 
 class HistoricalDataLoader:
@@ -101,7 +112,9 @@ class HistoricalDataLoader:
     ) -> Dict[Tuple[str, date], float]:
         """
         Fetch NOAA observed daily highs for all cities in date range.
-        Uses cache — only fetches missing dates from API.
+        Uses NCEI Climate Data Online (daily-summaries TMAX) which has
+        full historical data — unlike NWS observations which only keep ~14 days.
+        Results cached to CSV so API calls happen once.
         """
         self._highs = self._load_cached_highs()
         missing: List[Tuple[str, date]] = []
@@ -117,7 +130,7 @@ class HistoricalDataLoader:
             logger.info(f"All {len(self._highs)} daily highs loaded from cache")
             return self._highs
 
-        logger.info(f"Fetching {len(missing)} missing daily highs from NWS...")
+        logger.info(f"Fetching {len(missing)} missing daily highs from NCEI...")
 
         async with aiohttp.ClientSession() as session:
             by_city: Dict[str, List[date]] = {}
@@ -125,62 +138,56 @@ class HistoricalDataLoader:
                 by_city.setdefault(city, []).append(d)
 
             for city, dates in by_city.items():
-                station_id = cfg.noaa_stations.get(city)
-                if not station_id:
-                    logger.warning(f"No NOAA station for {city}, skipping")
+                ghcnd_id = GHCND_STATIONS.get(city)
+                if not ghcnd_id:
+                    logger.warning(f"No GHCND station for {city}, skipping")
                     continue
 
                 dates.sort()
+                # Fetch in 90-day windows (NCEI supports large ranges)
                 window_start = dates[0]
                 while window_start <= dates[-1]:
-                    window_end = window_start + timedelta(days=7)
-                    offset_hours = cfg.CITY_UTC_OFFSETS.get(city, -5)
-
-                    start_utc = datetime(
-                        window_start.year, window_start.month, window_start.day,
-                        tzinfo=timezone.utc
-                    ) - timedelta(hours=offset_hours)
-                    end_utc = datetime(
-                        window_end.year, window_end.month, window_end.day,
-                        tzinfo=timezone.utc
-                    ) - timedelta(hours=offset_hours)
+                    window_end = min(window_start + timedelta(days=90), dates[-1])
 
                     url = (
-                        f"{NWS_BASE}/stations/{station_id}/observations"
-                        f"?start={start_utc.isoformat().replace('+00:00', 'Z')}"
-                        f"&end={end_utc.isoformat().replace('+00:00', 'Z')}"
+                        f"{NCEI_BASE}?dataset=daily-summaries"
+                        f"&stations={ghcnd_id}"
+                        f"&startDate={window_start.isoformat()}"
+                        f"&endDate={window_end.isoformat()}"
+                        f"&dataTypes=TMAX&units=standard&format=json"
                     )
 
-                    data = await fetch_with_retry(
-                        session, url, headers=NWS_HEADERS,
-                        label=f"NWS-hist-{city}-{window_start}", timeout_sec=30.0,
-                    )
+                    try:
+                        async with session.get(
+                            url, timeout=aiohttp.ClientTimeout(total=30)
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json(content_type=None)
+                                if isinstance(data, list):
+                                    for row in data:
+                                        try:
+                                            obs_date = date.fromisoformat(row["DATE"])
+                                            tmax = float(row["TMAX"])
+                                            if (city, obs_date) not in self._highs:
+                                                self._cache_daily_high(city, obs_date, tmax)
+                                        except (KeyError, ValueError, TypeError):
+                                            continue
+                                    logger.info(
+                                        f"  {city}: fetched {len(data)} days "
+                                        f"({window_start} to {window_end})"
+                                    )
+                                else:
+                                    logger.warning(f"  {city}: unexpected response format")
+                            else:
+                                logger.warning(
+                                    f"  {city}: NCEI returned {resp.status} "
+                                    f"for {window_start} to {window_end}"
+                                )
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        logger.warning(f"  {city}: NCEI request failed: {e}")
 
-                    if data:
-                        features = data.get("features", [])
-                        daily_temps: Dict[date, float] = {}
-                        for obs in features:
-                            props = obs.get("properties", {})
-                            temp_c = props.get("temperature", {}).get("value")
-                            ts_str = props.get("timestamp", "")
-                            if temp_c is None or not ts_str:
-                                continue
-                            try:
-                                obs_time = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                                local_time = obs_time + timedelta(hours=offset_hours)
-                                obs_date = local_time.date()
-                                temp_f = temp_c * 9.0 / 5.0 + 32.0
-                                if obs_date not in daily_temps or temp_f > daily_temps[obs_date]:
-                                    daily_temps[obs_date] = temp_f
-                            except (ValueError, TypeError):
-                                continue
-
-                        for obs_date, high_f in daily_temps.items():
-                            if (city, obs_date) not in self._highs:
-                                self._cache_daily_high(city, obs_date, high_f)
-
-                    window_start = window_end
-                    await asyncio.sleep(0.5)
+                    window_start = window_end + timedelta(days=1)
+                    await asyncio.sleep(0.3)  # rate limit
 
         logger.info(f"Total daily highs available: {len(self._highs)}")
         return self._highs

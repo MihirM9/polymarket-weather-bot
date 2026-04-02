@@ -21,12 +21,16 @@ from typing import List, Tuple
 class MispricingModel:
     """
     Generate synthetic market prices with calibrated retail mispricing.
+
+    Includes bid-ask spread and slippage modeling for realistic execution.
     """
 
     tail_overpricing: float = 0.07
     mode_underpricing: float = -0.04
     noise_sigma: float = 0.03
     convergence_rate: float = 1.0
+    half_spread: float = 0.015      # half the bid-ask spread (3¢ total)
+    slippage_sigma: float = 0.005   # random slippage on fill price
 
     def generate_prices(
         self,
@@ -59,6 +63,22 @@ class MispricingModel:
             prices.append(max(0.02, min(0.98, raw_price)))
 
         return prices
+
+    def apply_execution_cost(self, price: float, side: str) -> float:
+        """
+        Apply bid-ask spread and slippage to simulate realistic execution.
+
+        BUY YES: you pay the ask (mid + half_spread + slippage)
+        SELL/BUY NO: you pay 1 - bid, so effective YES price drops
+        """
+        slippage = abs(random.gauss(0, self.slippage_sigma))
+        if side == "BUY":
+            # Buying YES: worse fill = higher price
+            fill_price = price + self.half_spread + slippage
+        else:
+            # Selling YES / Buying NO: worse fill = lower YES price
+            fill_price = price - self.half_spread - slippage
+        return max(0.02, min(0.98, fill_price))
 
     def calibrate(
         self,

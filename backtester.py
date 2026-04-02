@@ -184,7 +184,13 @@ class BacktestEngine:
     def _score_signal(
         self, signal: TradeSignal, actual_high: float
     ) -> Tuple[bool, float]:
-        """Score a trade signal against the actual temperature."""
+        """Score a trade signal against the actual temperature.
+
+        Applies realistic execution costs:
+        - Bid-ask spread (3¢ total) via MispricingModel.apply_execution_cost()
+        - Random slippage (~0.5¢ σ)
+        - Taker fee (2%) since we're crossing the spread
+        """
         lo, hi = _parse_bucket(signal.outcome_label)
 
         in_bucket = True
@@ -198,10 +204,16 @@ class BacktestEngine:
         else:
             won = not in_bucket
 
+        # Apply spread + slippage to fill price
+        fill_price = self.pricing.apply_execution_cost(
+            signal.price_limit, signal.side
+        )
+
+        # Use taker fee (2%) — we're crossing the spread, not posting limit orders
         pnl = ResolutionTracker._calculate_pnl(
-            signal.side, signal.price_limit,
+            signal.side, fill_price,
             signal.position_size_usd, won,
-            fee_rate=cfg.maker_fee_rate,
+            fee_rate=cfg.fee_rate,  # taker fee, not maker
         )
 
         return won, pnl
@@ -235,7 +247,8 @@ class BacktestEngine:
             methodology_notes=[
                 "Forecasts approximated from NOAA climatology + calibrated bias + noise.",
                 "Market prices from Gamma closed markets where available, synthetic elsewhere.",
-                "No execution simulation (fills assumed at limit price).",
+                "Execution costs: 3¢ bid-ask spread + slippage + 2% taker fee.",
+                "Trivial NO bets filtered (p_true > 85%) to avoid unrealistic edge.",
                 f"Random seed: {self.seed}",
             ],
         )
@@ -292,6 +305,15 @@ class BacktestEngine:
                         )
 
                         for sig in signals:
+                            # Filter trivial NO bets: if we're selling (buying NO)
+                            # and p_true > 85%, the outcome is near-certain — any
+                            # real market would price this correctly, no real edge.
+                            if sig.side == "SELL" and sig.p_true > 0.85:
+                                continue
+                            # Also filter trivial YES bets on near-zero buckets
+                            if sig.side == "BUY" and sig.p_true < 0.03:
+                                continue
+
                             won, pnl = self._score_signal(sig, actual_high)
 
                             mock_tracker.record_trade(

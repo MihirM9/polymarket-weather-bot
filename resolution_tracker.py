@@ -170,9 +170,12 @@ class ResolutionTracker:
         start = local_midnight_utc
         end = start + timedelta(hours=24)
 
+        # Fix: NWS API rejects Python's +00:00 UTC suffix with 400 Bad Request.
+        # Must use ISO 8601 'Z' suffix instead.
         url = (
             f"{NWS_BASE}/stations/{station_id}/observations"
-            f"?start={start.isoformat()}&end={end.isoformat()}"
+            f"?start={start.isoformat().replace('+00:00', 'Z')}"
+            f"&end={end.isoformat().replace('+00:00', 'Z')}"
         )
 
         data = await fetch_with_retry(

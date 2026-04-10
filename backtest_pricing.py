@@ -37,6 +37,17 @@ class MispricingModel:
         true_probs: List[float],
         days_out: int,
     ) -> List[float]:
+        """Generate synthetic market prices with calibrated retail mispricing.
+
+        Args:
+            true_probs: The model's forecast probabilities for each bucket.
+                These are the bot's own estimates at decision time, NOT resolved
+                outcomes. Mispricing biases (tail overpricing, mode underpricing)
+                are applied on top of these probabilities to simulate how the
+                market would price them.
+            days_out: Days until market resolution. Bias shrinks toward zero
+                as resolution approaches (convergence_rate controls speed).
+        """
         n = len(true_probs)
         if n == 0:
             return []
@@ -84,6 +95,16 @@ class MispricingModel:
         self,
         closed_data: List[Tuple[float, float, float]],
     ):
+        """Calibrate bias parameters from observed market data.
+
+        Args:
+            closed_data: List of (normalized_position, market_price, forecast_prob)
+                - normalized_position: 0.0 = lowest bucket, 1.0 = highest
+                - market_price: the actual Polymarket price
+                - forecast_prob: model's probability estimate at decision time
+
+        Bias = market_price - forecast_prob (positive = market overprices vs model)
+        """
         if not closed_data:
             return
 
@@ -91,8 +112,8 @@ class MispricingModel:
         mode_biases = []
         all_noise = []
 
-        for pos, price, outcome in closed_data:
-            bias = price - outcome
+        for pos, price, forecast_prob in closed_data:
+            bias = price - forecast_prob
             if pos < 0.2 or pos > 0.8:
                 tail_biases.append(bias)
             elif 0.4 <= pos <= 0.6:

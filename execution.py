@@ -434,6 +434,21 @@ class OrderExecutor:
                 order.avg_fill_price = signal.price_limit + 0.01
                 order.status = OrderStatus.PARTIAL
 
+                # Fix: Register fallback as pending maker so fill_tracker.tick()
+                # can eventually clear the remaining 50%. Without this, PARTIAL
+                # orders sit in limbo until stale timeout kills them.
+                from dry_run_simulator import SimulatedFill
+                fallback_fill = SimulatedFill(
+                    filled_size_usd=order.filled_size_usd,
+                    filled_shares=order.filled_shares,
+                    avg_fill_price=order.avg_fill_price,
+                    slippage=0.01,
+                    fill_ratio=0.5,
+                    is_maker=True,
+                    estimated_fill_cycles=3,
+                )
+                self.fill_tracker.register_pending(order_id, fallback_fill, order)
+
             self.tracker.register_order(order)
 
             # Build descriptive log message with fill quality info

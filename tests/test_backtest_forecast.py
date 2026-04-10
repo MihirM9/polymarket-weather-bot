@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import random
-from datetime import date
+from datetime import date, timedelta
 
 def test_realistic_forecast_uses_climatology_not_actual():
     """Core anti-leakage test: realistic forecast must NOT center on actual."""
@@ -60,16 +60,35 @@ def test_seasonal_sigma_multiplier():
     assert r_apr.sigma > r_jul.sigma
 
 def test_regime_inference():
+    """Regime should be inferred from lagged actuals, not the target day's actual."""
     from backtest_forecast import HistoricalForecastApproximator
 
+    target = date(2025, 7, 15)
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"Miami": {196: 91.0}})
 
-    r, _ = approx.generate("Miami", date(2025, 7, 15), days_out=1, actual_high=101.0)
+    # Lagged days all hot → heat/extreme regime
+    approx.set_lagged_actuals({"Miami": {
+        target - timedelta(days=1): 101.0,
+        target - timedelta(days=2): 102.0,
+        target - timedelta(days=3): 100.0,
+    }})
+    r, _ = approx.generate("Miami", target, days_out=1, actual_high=101.0)
     assert r.regime in ("heat", "frontal", "extreme")
 
-    r, _ = approx.generate("Miami", date(2025, 7, 15), days_out=1, actual_high=91.0)
+    # Lagged days near climatology → normal/stable regime
+    approx.set_lagged_actuals({"Miami": {
+        target - timedelta(days=1): 91.0,
+        target - timedelta(days=2): 92.0,
+        target - timedelta(days=3): 90.0,
+    }})
+    r, _ = approx.generate("Miami", target, days_out=1, actual_high=91.0)
     assert r.regime in ("normal", "stable")
+
+    # No lagged data → default to "normal"
+    approx.set_lagged_actuals({})
+    r, _ = approx.generate("Miami", target, days_out=1, actual_high=105.0)
+    assert r.regime == "normal"
 
 def test_confidence_from_sigma():
     from backtest_forecast import HistoricalForecastApproximator

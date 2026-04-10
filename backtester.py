@@ -9,12 +9,14 @@ Produces a scorecard with Sharpe, win rate, drawdown, breakdowns,
 parameter sensitivity analysis, and fragility notes.
 
 Usage:
-    python backtester.py                         # full backtest
+    python backtester.py                         # full backtest with 70/30 OOS split
     python backtester.py --quick                 # realistic only, no sensitivity
     python backtester.py --sensitivity           # include parameter sweeps
     python backtester.py --fetch-only            # just populate data caches
     python backtester.py --start 2025-01-01 --end 2026-03-31
     python backtester.py --cities "Miami,New York"
+    python backtester.py --oos-split 0.2         # 80/20 train/test split
+    python backtester.py --no-oos                # disable OOS split (quick testing)
 """
 
 import argparse
@@ -25,6 +27,8 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
+
+import aiohttp
 
 from backtest_data import HistoricalDataLoader
 from backtest_forecast import HistoricalForecastApproximator, SyntheticForecast
@@ -100,10 +104,40 @@ class BacktestEngine:
         forecast_sigma: float,
     ) -> TemperatureMarket:
         """
-        Build a TemperatureMarket from real Gamma data or synthetic prices.
+        Build a TemperatureMarket with this priority:
+        1. Real CLOB decision-time prices (best — non-circular)
+        2. Real Gamma final prices (acceptable — slight look-ahead)
+        3. Synthetic prices (worst — circular, only when no real data)
         """
-        real_prices = self.loader.get_real_market_prices(city, target_date)
+        # Priority 1: Decision-time prices from CLOB history
+        decision_prices = self.loader.get_decision_time_prices(
+            city, target_date, days_out
+        )
+        if decision_prices and len(decision_prices) >= 3:
+            outcomes = []
+            for label, price_yes in decision_prices.items():
+                lo, hi = _parse_bucket(label)
+                outcomes.append(MarketOutcome(
+                    outcome_label=label,
+                    token_id=f"real_{city}_{target_date}_{label}",
+                    price_yes=price_yes,
+                    price_no=round(1.0 - price_yes, 4),
+                    bucket_low=lo,
+                    bucket_high=hi,
+                ))
+            outcomes.sort(key=lambda o: (o.bucket_low if o.bucket_low is not None else -999))
+            return TemperatureMarket(
+                market_id=f"real_{city}_{target_date.isoformat()}",
+                question=f"What will the highest temperature be in {city} on {target_date}?",
+                city=city,
+                market_date=target_date,
+                resolution_source="NWS",
+                outcomes=outcomes,
+                active=True,
+            )
 
+        # Priority 2: Gamma final prices (existing behavior)
+        real_prices = self.loader.get_real_market_prices(city, target_date)
         if real_prices and len(real_prices) >= 3:
             outcomes = []
             for label, price_yes in real_prices.items():
@@ -116,32 +150,43 @@ class BacktestEngine:
                     bucket_low=lo,
                     bucket_high=hi,
                 ))
-        else:
-            buckets = self._select_buckets(forecast_high)
-            true_probs = bucket_probabilities(
-                forecast_high, forecast_sigma, buckets
-            )
-            prices = self.pricing.generate_prices(
-                [true_probs.get(i, 0.0) for i in range(len(buckets))],
-                days_out=days_out,
+            outcomes.sort(key=lambda o: (o.bucket_low if o.bucket_low is not None else -999))
+            return TemperatureMarket(
+                market_id=f"backtest_{city}_{target_date.isoformat()}",
+                question=f"What will the highest temperature be in {city} on {target_date}?",
+                city=city,
+                market_date=target_date,
+                resolution_source="NWS",
+                outcomes=outcomes,
+                active=True,
             )
 
-            outcomes = []
-            for i, ((lo, hi), price) in enumerate(zip(buckets, prices)):
-                label = self._bucket_label(lo, hi)
-                outcomes.append(MarketOutcome(
-                    outcome_label=label,
-                    token_id=f"backtest_{city}_{target_date}_{label}",
-                    price_yes=price,
-                    price_no=round(1.0 - price, 4),
-                    bucket_low=lo,
-                    bucket_high=hi,
-                ))
+        # Priority 3: Synthetic prices (fallback)
+        buckets = self._select_buckets(forecast_high)
+        true_probs = bucket_probabilities(
+            forecast_high, forecast_sigma, buckets
+        )
+        prices = self.pricing.generate_prices(
+            [true_probs.get(i, 0.0) for i in range(len(buckets))],
+            days_out=days_out,
+        )
+
+        outcomes = []
+        for i, ((lo, hi), price) in enumerate(zip(buckets, prices)):
+            label = self._bucket_label(lo, hi)
+            outcomes.append(MarketOutcome(
+                outcome_label=label,
+                token_id=f"synth_{city}_{target_date}_{label}",
+                price_yes=price,
+                price_no=round(1.0 - price, 4),
+                bucket_low=lo,
+                bucket_high=hi,
+            ))
 
         outcomes.sort(key=lambda o: (o.bucket_low if o.bucket_low is not None else -999))
 
         return TemperatureMarket(
-            market_id=f"backtest_{city}_{target_date.isoformat()}",
+            market_id=f"synth_{city}_{target_date.isoformat()}",
             question=f"What will the highest temperature be in {city} on {target_date}?",
             city=city,
             market_date=target_date,
@@ -218,6 +263,58 @@ class BacktestEngine:
 
         return won, pnl
 
+    def run_with_oos(
+        self,
+        cities: Optional[List[str]] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        oos_fraction: float = 0.3,
+    ) -> Tuple[BacktestResult, BacktestResult]:
+        """Run backtest with in-sample / out-of-sample split.
+
+        Returns (in_sample_result, out_of_sample_result).
+        The mispricing model is calibrated on in-sample only.
+        OOS uses the SAME parameters — no re-calibration.
+        """
+        if start_date is None:
+            start_date = date.today() - timedelta(days=365)
+        if end_date is None:
+            end_date = date.today() - timedelta(days=1)
+
+        total_days = (end_date - start_date).days
+        is_days = int(total_days * (1.0 - oos_fraction))
+        split_date = start_date + timedelta(days=is_days)
+        oos_start = split_date + timedelta(days=1)
+
+        logger.info(
+            f"OOS split: IS {start_date} -> {split_date} ({is_days}d), "
+            f"OOS {oos_start} -> {end_date} ({(end_date - oos_start).days}d), "
+            f"fraction={oos_fraction:.0%}"
+        )
+
+        # Run in-sample
+        is_result = self.run(cities, start_date, split_date)
+        is_result.methodology_notes.append(
+            f"IN-SAMPLE period: {start_date} to {split_date} ({is_days} days)"
+        )
+        is_result.methodology_notes.append(
+            f"OOS split fraction: {oos_fraction:.0%} holdout"
+        )
+
+        # Run out-of-sample with SAME model parameters (no re-calibration)
+        oos_result = self.run(cities, oos_start, end_date)
+        oos_result.methodology_notes.append(
+            f"OUT-OF-SAMPLE period: {oos_start} to {end_date} ({(end_date - oos_start).days} days)"
+        )
+        oos_result.methodology_notes.append(
+            f"OOS split fraction: {oos_fraction:.0%} holdout"
+        )
+        oos_result.methodology_notes.append(
+            "OOS uses same parameters as IS — no re-calibration."
+        )
+
+        return is_result, oos_result
+
     def run(
         self,
         cities: Optional[List[str]] = None,
@@ -255,6 +352,12 @@ class BacktestEngine:
 
         if not self.approximator._climatology:
             self.approximator.set_climatology(self.loader._climatology)
+
+        # Inject lagged actuals so regime inference uses previous days only
+        lagged: Dict[str, Dict[date, float]] = {}
+        for (c, d), temp in self.loader._highs.items():
+            lagged.setdefault(c, {})[d] = temp
+        self.approximator.set_lagged_actuals(lagged)
 
         engine = DecisionEngine()
 
@@ -324,6 +427,14 @@ class BacktestEngine:
                             # Get bucket bounds for the trade
                             bucket_lo, bucket_hi = _parse_bucket(sig.outcome_label)
 
+                            # Determine price source from market ID
+                            if market.market_id.startswith("real_"):
+                                price_source = "real_clob"
+                            elif market.market_id.startswith("backtest_"):
+                                price_source = "real_gamma"
+                            else:
+                                price_source = "synthetic"
+
                             result.record(BacktestTrade(
                                 city=city,
                                 target_date=current,
@@ -344,6 +455,7 @@ class BacktestEngine:
                                 pnl=pnl,
                                 variant=variant_name,
                                 regime=fc.regime,
+                                price_source=price_source,
                             ))
 
                 current += timedelta(days=1)
@@ -367,6 +479,11 @@ async def fetch_data(loader: HistoricalDataLoader, cities: List[str], start: dat
     logger.info("Fetching Gamma closed markets...")
     await loader.fetch_gamma_closed_markets()
 
+    logger.info("Fetching CLOB price histories...")
+    async with aiohttp.ClientSession() as session:
+        fetched = await loader.fetch_price_histories(session)
+    logger.info(f"Fetched price histories for {fetched} tokens")
+
     logger.info("Building climatology from observations...")
     loader.load_climatology_from_actuals(loader._highs)
 
@@ -381,6 +498,14 @@ def main():
     parser.add_argument("--quick", action="store_true", help="Realistic variant only, no sensitivity")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--bankroll", type=float, default=500.0, help="Simulated bankroll")
+    parser.add_argument(
+        "--oos-split", type=float, default=0.3,
+        help="Out-of-sample holdout fraction (default 0.3 = 30%%)",
+    )
+    parser.add_argument(
+        "--no-oos", action="store_true",
+        help="Disable train/test split — run single backtest on full range",
+    )
     args = parser.parse_args()
 
     start = date.fromisoformat(args.start) if args.start else date.today() - timedelta(days=365)
@@ -398,8 +523,51 @@ def main():
 
     engine.approximator.set_climatology(engine.loader._climatology)
 
-    if engine.loader._gamma_markets:
-        logger.info("Calibrating mispricing model from Gamma closed markets...")
+    if engine.loader._token_map:
+        logger.info("Calibrating mispricing model from real CLOB price histories...")
+        cal_data = []
+        for (city_name, mkt_date, label), token_id in engine.loader._token_map.items():
+            price = engine.loader._price_fetcher.get_decision_time_price(
+                token_id, mkt_date, days_out=5
+            )
+            if price is None:
+                continue
+
+            actual = engine.loader.get_actual_high(city_name, mkt_date)
+            if actual is None:
+                continue
+
+            lo, hi = _parse_bucket(label)
+            if lo is None and hi is None:
+                continue
+
+            doy = mkt_date.timetuple().tm_yday
+            clim = engine.loader._climatology.get(city_name, {}).get(doy, actual)
+            sigma = 4.5
+            probs = bucket_probabilities(clim, sigma, [(lo, hi)])
+            forecast_prob = probs.get(0, 0.0)
+
+            if lo is not None and hi is not None:
+                mid = (lo + hi) / 2.0
+                pos = max(0.0, min(1.0, (mid - clim + 20) / 40.0))
+            elif lo is None:
+                pos = 0.05
+            else:
+                pos = 0.95
+
+            cal_data.append((pos, price, forecast_prob))
+
+        if cal_data:
+            engine.pricing.calibrate(cal_data)
+            logger.info(
+                f"Calibrated from {len(cal_data)} real price points: "
+                f"tail_overpricing={engine.pricing.tail_overpricing:.3f}, "
+                f"mode_underpricing={engine.pricing.mode_underpricing:.3f}"
+            )
+        else:
+            logger.info("No real price data for calibration — using defaults")
+    elif engine.loader._gamma_markets:
+        logger.info("Calibrating mispricing model from Gamma final prices (fallback)...")
         cal_data = []
         for item in engine.loader._gamma_markets:
             city_name, mkt_date, lo, hi, price = engine.loader._parse_gamma_market(item)
@@ -413,74 +581,226 @@ def main():
                 f"mode_underpricing={engine.pricing.mode_underpricing:.3f}"
             )
 
-    logger.info("Running backtest...")
-    result = engine.run(cities=cities, start_date=start, end_date=end)
+    use_oos = not args.no_oos
+    sensitivity_variance = 0.0
 
-    scorecard = BacktestScorecard(result.trades)
-    print(scorecard.render("realistic"))
+    if use_oos:
+        # -- Out-of-sample discipline --
+        logger.info(f"Running backtest with OOS split ({args.oos_split:.0%} holdout)...")
+        is_result, oos_result = engine.run_with_oos(
+            cities=cities, start_date=start, end_date=end,
+            oos_fraction=args.oos_split,
+        )
 
-    if not args.quick:
-        print(scorecard.render("optimistic"))
+        is_scorecard = BacktestScorecard(is_result.trades)
+        oos_scorecard = BacktestScorecard(oos_result.trades)
 
-    csv_path = "data/backtest_results.csv"
-    scorecard.export_csv(csv_path)
-    logger.info(f"Results exported to {csv_path}")
+        # Print both scorecards
+        print("\n" + "#" * 62)
+        print("  IN-SAMPLE RESULTS")
+        print("#" * 62)
+        print(is_scorecard.render("realistic"))
 
-    if args.sensitivity:
-        logger.info("Running sensitivity sweeps...")
-        analyzer = SensitivityAnalyzer()
-        for param, values in analyzer.SWEEPS.items():
-            sweep_results: Dict = {}
-            for val in values:
-                original = getattr(cfg, param, None)
-                if original is not None:
-                    setattr(cfg, param, val)
-                    sweep_engine = BacktestEngine(bankroll=args.bankroll, seed=args.seed)
-                    sweep_engine.loader = engine.loader
-                    sweep_engine.approximator = engine.approximator
-                    sweep_engine.pricing = engine.pricing
-                    sweep_result = sweep_engine.run(cities=cities, start_date=start, end_date=end)
-                    sweep_sc = BacktestScorecard(sweep_result.trades)
-                    sweep_results[val] = {
-                        "sharpe": sweep_sc.sharpe_ratio("realistic"),
-                        "win_rate": sweep_sc.win_rate("realistic"),
-                        "max_dd": sweep_sc.max_drawdown("realistic"),
-                        "pnl": sweep_sc.total_pnl("realistic"),
-                        "trades": sweep_sc.trade_count("realistic"),
-                    }
-                    setattr(cfg, param, original)
+        if not args.quick:
+            print(is_scorecard.render("optimistic"))
 
-            current = getattr(cfg, param, 0)
-            print(analyzer.render_sweep_result(param, sweep_results, current))
-            print()
+        print("\n" + "#" * 62)
+        print("  OUT-OF-SAMPLE RESULTS")
+        print("#" * 62)
+        print(oos_scorecard.render("realistic"))
 
-    sharpe = scorecard.sharpe_ratio("realistic")
-    wr = scorecard.win_rate("realistic")
-    dd = scorecard.max_drawdown("realistic")
-    dd_pct = (dd / args.bankroll) * 100
+        if not args.quick:
+            print(oos_scorecard.render("optimistic"))
 
-    print("\n" + "=" * 62)
-    print("  VERDICT")
-    passed = True
-    if sharpe < 1.5:
-        print(f"  FAIL: Sharpe {sharpe:.2f} < 1.5")
-        passed = False
+        # Export combined CSV
+        csv_path = "data/backtest_results.csv"
+        # Use IS trades for the main CSV; also export OOS separately
+        is_scorecard.export_csv(csv_path)
+        oos_csv_path = "data/backtest_results_oos.csv"
+        oos_scorecard.export_csv(oos_csv_path)
+        logger.info(f"Results exported to {csv_path} and {oos_csv_path}")
+
+        # Sensitivity sweeps (run on IS data only to avoid OOS contamination)
+        if args.sensitivity:
+            logger.info("Running sensitivity sweeps (in-sample only)...")
+            analyzer = SensitivityAnalyzer()
+            sharpe_values: List[float] = []
+            for param, values in analyzer.SWEEPS.items():
+                sweep_results: Dict = {}
+                for val in values:
+                    original = getattr(cfg, param, None)
+                    if original is not None:
+                        setattr(cfg, param, val)
+                        sweep_engine = BacktestEngine(bankroll=args.bankroll, seed=args.seed)
+                        sweep_engine.loader = engine.loader
+                        sweep_engine.approximator = engine.approximator
+                        sweep_engine.pricing = engine.pricing
+                        # Compute IS split date to run sweeps on IS only
+                        total_days = (end - start).days
+                        is_days = int(total_days * (1.0 - args.oos_split))
+                        split_date = start + timedelta(days=is_days)
+                        sweep_result = sweep_engine.run(
+                            cities=cities, start_date=start, end_date=split_date,
+                        )
+                        sweep_sc = BacktestScorecard(sweep_result.trades)
+                        sr_val = sweep_sc.sharpe_ratio("realistic")
+                        sharpe_values.append(sr_val)
+                        sweep_results[val] = {
+                            "sharpe": sr_val,
+                            "win_rate": sweep_sc.win_rate("realistic"),
+                            "max_dd": sweep_sc.max_drawdown("realistic"),
+                            "pnl": sweep_sc.total_pnl("realistic"),
+                            "trades": sweep_sc.trade_count("realistic"),
+                        }
+                        setattr(cfg, param, original)
+
+                current = getattr(cfg, param, 0)
+                print(analyzer.render_sweep_result(param, sweep_results, current))
+                print()
+
+            # Compute sensitivity variance across all sweep Sharpe values
+            if len(sharpe_values) >= 2:
+                mean_sr = sum(sharpe_values) / len(sharpe_values)
+                sensitivity_variance = (
+                    sum((s - mean_sr) ** 2 for s in sharpe_values) / (len(sharpe_values) - 1)
+                ) ** 0.5
+
+        # -- Compare IS vs OOS --
+        is_sharpe = is_scorecard.sharpe_ratio("realistic")
+        oos_sharpe = oos_scorecard.sharpe_ratio("realistic")
+        is_sharpe_opt = is_scorecard.sharpe_ratio("optimistic")
+        is_sharpe_real = is_scorecard.sharpe_ratio("realistic")
+
+        # Leakage gap: how much better optimistic is than realistic
+        leakage_gap = max(0.0, is_sharpe_opt - is_sharpe_real)
+
+        print("\n" + "=" * 62)
+        print("  OOS COMPARISON")
+        print("=" * 62)
+        print(f"  IS  Sharpe (realistic):  {is_sharpe:.2f}")
+        print(f"  OOS Sharpe (realistic):  {oos_sharpe:.2f}")
+
+        if is_sharpe > 0:
+            oos_ratio = oos_sharpe / is_sharpe
+            print(f"  OOS / IS ratio:          {oos_ratio:.1%}")
+        else:
+            oos_ratio = 0.0
+            print(f"  OOS / IS ratio:          N/A (IS Sharpe <= 0)")
+
+        print(f"  Leakage gap (opt-real):  {leakage_gap:.2f}")
+
+        if oos_ratio < 0.50 and is_sharpe > 0:
+            print("")
+            print("  " + "!" * 58)
+            print("  !!  WARNING: OOS Sharpe < 50% of IS Sharpe  !!")
+            print("  !!  This is a strong signal of OVERFITTING.  !!")
+            print("  !!  The strategy likely exploits in-sample   !!")
+            print("  !!  patterns that do not persist out-of-sample. !!")
+            print("  " + "!" * 58)
+
+        # Use OOS scorecard for final verdict (the honest assessment)
+        scorecard = oos_scorecard
+        score, penalties = scorecard.robustness_score(
+            "realistic",
+            sensitivity_variance=sensitivity_variance,
+            leakage_gap=leakage_gap,
+        )
+        verdict_label = BacktestScorecard.robustness_verdict(score)
+
+        print("\n" + "=" * 62)
+        print("  VERDICT (based on OUT-OF-SAMPLE)")
+        print("=" * 62)
+        print(f"  Robustness Score: {score:.0f} / 100")
+        print(f"  Verdict:          {verdict_label}")
+        if penalties:
+            print("")
+            print("  Penalties:")
+            for p in penalties:
+                print(f"    - {p}")
+        print("=" * 62)
+
     else:
-        print(f"  PASS: Sharpe {sharpe:.2f} >= 1.5")
-    if wr < 0.62:
-        print(f"  FAIL: Win rate {wr:.1%} < 62%")
-        passed = False
-    else:
-        print(f"  PASS: Win rate {wr:.1%} >= 62%")
-    if dd_pct > 15:
-        print(f"  FAIL: Max drawdown {dd_pct:.1f}% > 15%")
-        passed = False
-    else:
-        print(f"  PASS: Max drawdown {dd_pct:.1f}% <= 15%")
+        # -- No OOS: original single-run behavior --
+        logger.info("Running backtest (no OOS split)...")
+        result = engine.run(cities=cities, start_date=start, end_date=end)
+        result.methodology_notes.append("OOS split: DISABLED (--no-oos flag)")
 
-    verdict = "STRATEGY VALIDATED" if passed else "STRATEGY NEEDS SURGERY"
-    print(f"\n  {verdict}")
-    print("=" * 62)
+        scorecard = BacktestScorecard(result.trades)
+        print(scorecard.render("realistic"))
+
+        if not args.quick:
+            print(scorecard.render("optimistic"))
+
+        csv_path = "data/backtest_results.csv"
+        scorecard.export_csv(csv_path)
+        logger.info(f"Results exported to {csv_path}")
+
+        if args.sensitivity:
+            logger.info("Running sensitivity sweeps...")
+            analyzer = SensitivityAnalyzer()
+            sharpe_values_no_oos: List[float] = []
+            for param, values in analyzer.SWEEPS.items():
+                sweep_results: Dict = {}
+                for val in values:
+                    original = getattr(cfg, param, None)
+                    if original is not None:
+                        setattr(cfg, param, val)
+                        sweep_engine = BacktestEngine(bankroll=args.bankroll, seed=args.seed)
+                        sweep_engine.loader = engine.loader
+                        sweep_engine.approximator = engine.approximator
+                        sweep_engine.pricing = engine.pricing
+                        sweep_result = sweep_engine.run(cities=cities, start_date=start, end_date=end)
+                        sweep_sc = BacktestScorecard(sweep_result.trades)
+                        sr_val = sweep_sc.sharpe_ratio("realistic")
+                        sharpe_values_no_oos.append(sr_val)
+                        sweep_results[val] = {
+                            "sharpe": sr_val,
+                            "win_rate": sweep_sc.win_rate("realistic"),
+                            "max_dd": sweep_sc.max_drawdown("realistic"),
+                            "pnl": sweep_sc.total_pnl("realistic"),
+                            "trades": sweep_sc.trade_count("realistic"),
+                        }
+                        setattr(cfg, param, original)
+
+                current = getattr(cfg, param, 0)
+                print(analyzer.render_sweep_result(param, sweep_results, current))
+                print()
+
+            if len(sharpe_values_no_oos) >= 2:
+                mean_sr = sum(sharpe_values_no_oos) / len(sharpe_values_no_oos)
+                sensitivity_variance = (
+                    sum((s - mean_sr) ** 2 for s in sharpe_values_no_oos)
+                    / (len(sharpe_values_no_oos) - 1)
+                ) ** 0.5
+
+        # Leakage gap from optimistic vs realistic
+        opt_sharpe = scorecard.sharpe_ratio("optimistic")
+        real_sharpe = scorecard.sharpe_ratio("realistic")
+        leakage_gap = max(0.0, opt_sharpe - real_sharpe)
+
+        score, penalties = scorecard.robustness_score(
+            "realistic",
+            sensitivity_variance=sensitivity_variance,
+            leakage_gap=leakage_gap,
+        )
+        verdict_label = BacktestScorecard.robustness_verdict(score)
+
+        print("\n" + "=" * 62)
+        print("  VERDICT (no OOS — treat with caution)")
+        print("=" * 62)
+        print(f"  Robustness Score: {score:.0f} / 100")
+        print(f"  Verdict:          {verdict_label}")
+        if leakage_gap > 0.5:
+            print(f"  Leakage gap:      {leakage_gap:.2f} (optimistic >> realistic)")
+        if penalties:
+            print("")
+            print("  Penalties:")
+            for p in penalties:
+                print(f"    - {p}")
+        print("")
+        print("  NOTE: No out-of-sample holdout was used.")
+        print("  Results may be overly optimistic. Re-run without --no-oos.")
+        print("=" * 62)
 
 
 if __name__ == "__main__":

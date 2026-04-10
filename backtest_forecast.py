@@ -16,7 +16,7 @@ and optimistic quantifies how much look-ahead leakage would help.
 import math
 import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, Optional, Tuple
 
 from forecast_scanner import compute_confidence
@@ -67,14 +67,35 @@ class HistoricalForecastApproximator:
 
     def __init__(self):
         self._climatology: Dict[str, Dict[int, float]] = {}
+        self._lagged_actuals: Dict[str, Dict[date, float]] = {}
 
     def set_climatology(self, climatology: Dict[str, Dict[int, float]]):
         self._climatology = climatology
 
+    def set_lagged_actuals(self, highs: Dict[str, Dict[date, float]]):
+        """Inject historical daily high temperatures so _infer_regime can
+        use lagged (previous 3 days) observations instead of the target
+        day's actual high.  Called by the backtester before generate()."""
+        self._lagged_actuals = highs
+
     def _infer_regime(
-        self, city: str, target_date: date, actual_high: float, climatology: float
+        self, city: str, target_date: date, climatology: float
     ) -> str:
-        delta = actual_high - climatology
+        """Infer weather regime using ONLY information available at forecast
+        time: climatology + the previous 3 days' observed highs.  This
+        avoids look-ahead bias — the target day's actual_high is never used.
+
+        If no lagged data is available, defaults to "normal".
+        """
+        city_actuals = self._lagged_actuals.get(city, {})
+        lag_dates = [target_date - timedelta(days=d) for d in (1, 2, 3)]
+        lag_temps = [city_actuals[d] for d in lag_dates if d in city_actuals]
+
+        if not lag_temps:
+            return "normal"
+
+        lag_mean = sum(lag_temps) / len(lag_temps)
+        delta = lag_mean - climatology
 
         if abs(delta) > 12:
             return "extreme"
@@ -103,6 +124,16 @@ class HistoricalForecastApproximator:
         days_out: int,
         actual_high: float,
     ) -> Tuple[SyntheticForecast, SyntheticForecast]:
+        """Generate realistic + optimistic synthetic forecasts.
+
+        Args:
+            city: City name matching climatology keys.
+            target_date: The date being forecast.
+            days_out: Forecast horizon in days (0 = same-day).
+            actual_high: The observed daily high.  Used ONLY for the
+                optimistic variant's forecast center — never for regime
+                inference or the realistic variant.
+        """
         doy = target_date.timetuple().tm_yday
         month = target_date.month
 
@@ -111,7 +142,7 @@ class HistoricalForecastApproximator:
         if clim is None:
             clim = actual_high
 
-        regime = self._infer_regime(city, target_date, actual_high, clim)
+        regime = self._infer_regime(city, target_date, clim)
 
         base_sigma = HORIZON_SIGMA.get(days_out, 6.0)
         seasonal_mult = SEASONAL_SIGMA_MULT.get(month, 1.0)

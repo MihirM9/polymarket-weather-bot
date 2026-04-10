@@ -18,7 +18,9 @@ intended_exposure (what we hoped would fill) for all risk cap calculations.
 
 import asyncio
 import csv
+import json
 import logging
+import os
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone, timedelta
@@ -31,6 +33,7 @@ from config import cfg
 logger = logging.getLogger(__name__)
 
 POSITION_LOG = Path("logs") / "positions.csv"
+TRACKER_STATE_FILE = Path("logs") / "tracker_state.json"
 
 
 class OrderStatus(Enum):
@@ -106,6 +109,7 @@ class PositionTracker:
         self._total_fills: int = 0
 
         self._init_log()
+        self._load_state()
 
     def _init_log(self):
         if not POSITION_LOG.exists():
@@ -133,6 +137,219 @@ class PositionTracker:
                 f"{order.age_seconds:.0f}",
             ])
 
+    def _save_state(self):
+        """Persist all orders to disk so positions survive bot restarts."""
+        try:
+            data = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "today": self._today.isoformat() if self._today else None,
+                "daily_realized": self._daily_realized,
+                "daily_pending": self._daily_pending,
+                "total_fills": self._total_fills,
+                "instant_fill_count": self._instant_fill_count,
+                "fill_speeds": self._fill_speeds[-100:],  # keep last 100
+                "orders": {
+                    oid: {
+                        "order_id": o.order_id,
+                        "token_id": o.token_id,
+                        "market_id": o.market_id,
+                        "city": o.city,
+                        "market_date": o.market_date.isoformat(),
+                        "outcome_label": o.outcome_label,
+                        "side": o.side,
+                        "intended_size_usd": o.intended_size_usd,
+                        "limit_price": o.limit_price,
+                        "submitted_at": o.submitted_at.isoformat(),
+                        "status": o.status.value,
+                        "filled_size_usd": o.filled_size_usd,
+                        "filled_shares": o.filled_shares,
+                        "avg_fill_price": o.avg_fill_price,
+                    }
+                    for oid, o in self._orders.items()
+                },
+            }
+            tmp = str(TRACKER_STATE_FILE) + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, TRACKER_STATE_FILE)
+        except Exception as e:
+            logger.warning(f"Failed to save tracker state: {e}")
+
+    def _bootstrap_from_csv(self):
+        """One-time fallback: rebuild positions from logs/trades.csv.
+
+        This handles the case where the bot was running before persistence
+        was added. Reads every trade row and reconstructs OpenOrder objects
+        so the dashboard and dedup logic see all historical positions.
+        """
+        trade_log = Path("logs/trades.csv")
+        if not trade_log.exists():
+            logger.info("No trades.csv found — starting with empty positions")
+            return
+
+        try:
+            with open(trade_log) as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            if not rows:
+                logger.info("trades.csv is empty — no positions to bootstrap")
+                return
+
+            # Deduplicate: keep only the LATEST trade per market_id + outcome.
+            # The bot may re-enter the same bucket across cycles, but each
+            # market_id:outcome pair is one position, not multiple.
+            deduped = {}
+            for row in rows:
+                key = (row.get("market_id", ""), row.get("outcome", ""))
+                deduped[key] = row  # later rows overwrite earlier ones
+            rows = list(deduped.values())
+
+            restored = 0
+            for row in rows:
+                try:
+                    order_id = row.get("order_id", "")
+                    if not order_id or order_id in self._orders:
+                        continue
+
+                    # Parse fill status
+                    status_str = row.get("fill_status", "pending").lower()
+                    status_map = {
+                        "filled": OrderStatus.FILLED,
+                        "partial": OrderStatus.PARTIAL,
+                        "pending": OrderStatus.PENDING,
+                        "cancelled": OrderStatus.CANCELLED,
+                        "failed": OrderStatus.FAILED,
+                    }
+                    status = status_map.get(status_str, OrderStatus.PENDING)
+
+                    # Parse timestamp
+                    ts_str = row.get("timestamp", "")
+                    try:
+                        submitted_at = datetime.fromisoformat(ts_str)
+                    except (ValueError, TypeError):
+                        submitted_at = datetime.now(timezone.utc)
+
+                    # Parse market date
+                    md_str = row.get("market_date", "")
+                    try:
+                        market_date = date.fromisoformat(md_str)
+                    except (ValueError, TypeError):
+                        continue  # skip rows without valid market date
+
+                    intended_usd = float(row.get("intended_usd", 0) or 0)
+                    filled_usd = float(row.get("filled_usd", 0) or 0)
+                    limit_price = float(row.get("price_limit", 0) or 0)
+                    avg_fill = float(row.get("avg_fill_price", 0) or 0)
+                    filled_shares = filled_usd / avg_fill if avg_fill > 0 else 0.0
+
+                    order = OpenOrder(
+                        order_id=order_id,
+                        token_id=row.get("token_id", ""),
+                        market_id=row.get("market_id", ""),
+                        city=row.get("city", ""),
+                        market_date=market_date,
+                        outcome_label=row.get("outcome", ""),
+                        side=row.get("side", "BUY"),
+                        intended_size_usd=intended_usd,
+                        limit_price=limit_price,
+                        submitted_at=submitted_at,
+                        status=status,
+                        filled_size_usd=filled_usd,
+                        filled_shares=filled_shares,
+                        avg_fill_price=avg_fill,
+                    )
+                    self._orders[order_id] = order
+                    if status == OrderStatus.FILLED:
+                        self._daily_realized += filled_usd
+                        self._total_fills += 1
+                    elif status == OrderStatus.PARTIAL:
+                        self._daily_realized += filled_usd
+                        self._daily_pending += (intended_usd - filled_usd)
+                    elif status == OrderStatus.PENDING:
+                        self._daily_pending += intended_usd
+                    restored += 1
+
+                except Exception as e:
+                    logger.warning(f"Skipping CSV row bootstrap: {e}")
+                    continue
+
+            if restored:
+                logger.info(
+                    f"Bootstrapped {restored} positions from trades.csv "
+                    f"(realized=${self._daily_realized:.2f}, "
+                    f"pending=${self._daily_pending:.2f}, "
+                    f"fills={self._total_fills})"
+                )
+                self._today = date.today()
+                self._save_state()  # persist so next restart uses JSON
+            else:
+                logger.info("No positions bootstrapped from trades.csv")
+
+        except Exception as e:
+            logger.warning(f"CSV bootstrap failed: {e}")
+
+    def _load_state(self):
+        """Load persisted orders from disk on startup.
+
+        Falls back to rebuilding from trades.csv if no tracker_state.json exists,
+        so positions survive even the first deploy of this persistence feature.
+        """
+        if not TRACKER_STATE_FILE.exists():
+            logger.info("No saved tracker state found — attempting CSV bootstrap")
+            self._bootstrap_from_csv()
+            return
+
+        try:
+            with open(TRACKER_STATE_FILE) as f:
+                data = json.load(f)
+
+            saved_date_str = data.get("today")
+            if saved_date_str:
+                self._today = date.fromisoformat(saved_date_str)
+            self._daily_realized = data.get("daily_realized", 0.0)
+            self._daily_pending = data.get("daily_pending", 0.0)
+            self._total_fills = data.get("total_fills", 0)
+            self._instant_fill_count = data.get("instant_fill_count", 0)
+            self._fill_speeds = data.get("fill_speeds", [])
+
+            orders_data = data.get("orders", {})
+            for oid, od in orders_data.items():
+                try:
+                    order = OpenOrder(
+                        order_id=od["order_id"],
+                        token_id=od["token_id"],
+                        market_id=od["market_id"],
+                        city=od["city"],
+                        market_date=date.fromisoformat(od["market_date"]),
+                        outcome_label=od["outcome_label"],
+                        side=od["side"],
+                        intended_size_usd=od["intended_size_usd"],
+                        limit_price=od["limit_price"],
+                        submitted_at=datetime.fromisoformat(od["submitted_at"]),
+                        status=OrderStatus(od["status"]),
+                        filled_size_usd=od.get("filled_size_usd", 0.0),
+                        filled_shares=od.get("filled_shares", 0.0),
+                        avg_fill_price=od.get("avg_fill_price", 0.0),
+                    )
+                    self._orders[oid] = order
+                except Exception as e:
+                    logger.warning(f"Skipping corrupted order {oid}: {e}")
+
+            logger.info(
+                f"Restored {len(self._orders)} orders from disk "
+                f"(realized=${self._daily_realized:.2f}, "
+                f"pending=${self._daily_pending:.2f}, "
+                f"fills={self._total_fills})"
+            )
+
+            # Run daily reset check — archives old terminal orders if date changed
+            self._reset_daily_if_needed()
+            self._recalculate_pending()
+
+        except Exception as e:
+            logger.warning(f"Failed to load tracker state: {e} — starting fresh")
+
     def _reset_daily_if_needed(self):
         today = date.today()
         if self._today != today:
@@ -156,9 +373,19 @@ class PositionTracker:
         """Called by executor after successfully submitting an order."""
         self._reset_daily_if_needed()
         self._orders[order.order_id] = order
-        self._daily_pending += order.intended_size_usd
+
+        # Fix: If the simulator already filled this order, route to realized exposure.
+        # Previously, all orders went to _daily_pending, meaning immediate taker fills
+        # vanished from exposure tracking when _recalculate_pending() removed them
+        # (since they're terminal). This caused the bot to think it had $0 at risk.
+        if order.is_terminal:
+            self._daily_realized += order.filled_size_usd
+        else:
+            self._daily_pending += order.intended_size_usd
+
         logger.info(f"Registered order {order.order_id}: {order.side} {order.outcome_label} "
                      f"${order.intended_size_usd:.2f} @ {order.limit_price:.3f}")
+        self._save_state()
 
     def register_dry_run_fill(self, order: OpenOrder):
         """For dry-run mode: immediately mark as filled at limit price.
@@ -182,6 +409,7 @@ class PositionTracker:
         self._orders[order.order_id] = order
         self._daily_realized += order.filled_size_usd
         self._log_order(order)
+        self._save_state()
 
     async def poll_fills(self) -> int:
         """
@@ -262,6 +490,8 @@ class PositionTracker:
         changed += stale_cancelled
 
         self._recalculate_pending()
+        if changed:
+            self._save_state()
         return changed
 
     async def _cancel_stale_orders(self) -> int:

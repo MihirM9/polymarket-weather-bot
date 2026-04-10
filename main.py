@@ -113,6 +113,7 @@ async def run_scan_cycle(
             )
         tracker._recalculate_pending()
         if newly_filled:
+            tracker._save_state()
             logger.info(f"Dry-run fill tick: {len(newly_filled)} order(s) filled. "
                         f"{executor.fill_tracker.get_summary()}")
     logger.info(f"Exposure state: {tracker.get_exposure_summary()}")
@@ -315,6 +316,17 @@ def export_dashboard_state(
             if not o.is_terminal:
                 city_exp[o.city] = city_exp.get(o.city, 0) + o.filled_size_usd + o.unfilled_usd
 
+        # Total deployed: sum of filled USD on UNRESOLVED positions only.
+        # Resolved markets (past market_date) no longer tie up capital.
+        today = date_type.today()
+        total_deployed = sum(
+            o.filled_size_usd for o in orders
+            if o.filled_size_usd > 0
+            and o.status != OrderStatus.CANCELLED
+            and o.status != OrderStatus.FAILED
+            and o.market_date >= today  # exclude resolved/expired markets
+        )
+
         state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": "live" if cfg.is_live else "dry-run",
@@ -324,6 +336,7 @@ def export_dashboard_state(
             "daily_pnl": resolution_tracker.state.total_pnl,
             "daily_loss_cap_used": abs(engine.daily_pnl) / cfg.daily_loss_cap if cfg.daily_loss_cap > 0 else 0,
             "total_exposure": tracker.total_exposure,
+            "total_deployed": round(total_deployed, 2),
             "realized_exposure": tracker.realized_exposure,
             "pending_exposure": tracker.pending_exposure,
             "positions": positions,

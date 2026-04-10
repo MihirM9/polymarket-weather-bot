@@ -10,7 +10,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, fields, asdict
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ class BacktestTrade:
     pnl: float                # realized P&L in USD
     variant: str               # e.g. "realistic", "optimistic"
     regime: str = "normal"     # weather regime at trade time
+    price_source: str = "synthetic"  # "real_clob", "real_gamma", or "synthetic"
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +218,180 @@ class BacktestScorecard:
     def breakdown_by_side(self, variant: str) -> Dict[str, Dict[str, Any]]:
         return self._breakdown(variant, lambda t: t.side)
 
+    def breakdown_by_source(self, variant: str) -> Dict[str, Dict[str, Any]]:
+        return self._breakdown(variant, lambda t: getattr(t, 'price_source', 'synthetic'))
+
     # -- fragility analysis -------------------------------------------------
+
+    def robustness_score(
+        self,
+        variant: str,
+        sensitivity_variance: float = 0.0,
+        leakage_gap: float = 0.0,
+    ) -> Tuple[float, List[str]]:
+        """Weighted robustness score (0-100) with penalty breakdown.
+
+        Args:
+            sensitivity_variance: std dev of Sharpe across parameter sweeps (0 if not run)
+            leakage_gap: optimistic_sharpe - realistic_sharpe (measures look-ahead leakage)
+
+        Returns:
+            (score, [penalty_descriptions])
+        """
+        score = 100.0
+        penalties: List[str] = []
+
+        # --- Sharpe penalty ---
+        sr = self.sharpe_ratio(variant)
+        if sr < 1.0:
+            score -= 20
+            penalties.append(f"Sharpe {sr:.2f} < 1.0: -20")
+        elif sr < 1.5:
+            score -= 10
+            penalties.append(f"Sharpe {sr:.2f} < 1.5: -10")
+        elif sr < 2.0:
+            score -= 5
+            penalties.append(f"Sharpe {sr:.2f} < 2.0: -5")
+
+        # --- Win rate penalty ---
+        wr = self.win_rate(variant)
+        if wr < 0.55:
+            score -= 15
+            penalties.append(f"Win rate {wr:.1%} < 55%: -15")
+        elif wr < 0.60:
+            score -= 10
+            penalties.append(f"Win rate {wr:.1%} < 60%: -10")
+        elif wr < 0.62:
+            score -= 5
+            penalties.append(f"Win rate {wr:.1%} < 62%: -5")
+
+        # --- Drawdown penalty (as % of total PnL used as proxy for bankroll) ---
+        # Use total_pnl as bankroll proxy; if no profit, use absolute max_dd
+        total = self.total_pnl(variant)
+        mdd = self.max_drawdown(variant)
+        # Express drawdown as fraction of bankroll (approximate via total PnL)
+        # If total PnL <= 0, any drawdown is severe
+        if total > 0:
+            dd_pct = mdd / total
+        else:
+            dd_pct = 1.0 if mdd > 0 else 0.0
+
+        if dd_pct > 0.20:
+            score -= 15
+            penalties.append(f"Max DD {dd_pct:.0%} of bankroll > 20%: -15")
+        elif dd_pct > 0.15:
+            score -= 10
+            penalties.append(f"Max DD {dd_pct:.0%} of bankroll > 15%: -10")
+        elif dd_pct > 0.10:
+            score -= 5
+            penalties.append(f"Max DD {dd_pct:.0%} of bankroll > 10%: -5")
+
+        # --- Regime concentration penalty ---
+        by_regime = self.breakdown_by_regime(variant)
+        total_pnl_abs = total if total != 0 else 1.0
+        for regime, stats in by_regime.items():
+            regime_pnl_frac = stats["pnl"] / total_pnl_abs if total_pnl_abs != 0 else 0.0
+            if stats["trades"] >= 10 and stats["pnl"] < 0:
+                score -= 15
+                penalties.append(
+                    f"Regime '{regime}' negative PnL ${stats['pnl']:.2f} with {stats['trades']} trades: -15"
+                )
+                break  # only penalize once for worst offender
+        else:
+            # Check concentration only if no negative-regime penalty applied
+            for regime, stats in by_regime.items():
+                if total > 0 and stats["pnl"] / total > 0.40:
+                    score -= 10
+                    penalties.append(
+                        f"Regime '{regime}' contributes {stats['pnl'] / total:.0%} of total PnL (>40%): -10"
+                    )
+                    break
+
+        # --- Month concentration penalty ---
+        by_month = self.breakdown_by_month(variant)
+        worst_month_pnl = 0.0
+        for month, stats in by_month.items():
+            if total > 0 and stats["pnl"] / total > 0.35:
+                score -= 10
+                penalties.append(
+                    f"Month {month} contributes {stats['pnl'] / total:.0%} of total PnL (>35%): -10"
+                )
+                break
+        for month, stats in by_month.items():
+            if stats["pnl"] < worst_month_pnl:
+                worst_month_pnl = stats["pnl"]
+        if total > 0 and worst_month_pnl < 0 and abs(worst_month_pnl) / total > 0.05:
+            score -= 5
+            penalties.append(
+                f"Worst month PnL ${worst_month_pnl:.2f} is >{5}% of total PnL: -5"
+            )
+
+        # --- Side imbalance penalty ---
+        by_side = self.breakdown_by_side(variant)
+        n_trades = self.trade_count(variant)
+        if n_trades > 0:
+            for side, stats in by_side.items():
+                if stats["trades"] / n_trades > 0.80:
+                    score -= 10
+                    penalties.append(
+                        f"Side '{side}' is {stats['trades'] / n_trades:.0%} of trades (>80%): -10"
+                    )
+                    break
+
+        # --- Sensitivity variance penalty ---
+        if sensitivity_variance > 0:
+            sv_penalty = 5.0 * min(4.0, sensitivity_variance / 0.3)
+            score -= sv_penalty
+            penalties.append(
+                f"Sensitivity variance {sensitivity_variance:.3f} (Sharpe instability): -{sv_penalty:.1f}"
+            )
+
+        # --- Look-ahead leakage penalty ---
+        if leakage_gap > 1.0:
+            score -= 20
+            penalties.append(f"Look-ahead leakage gap {leakage_gap:.2f} > 1.0: -20")
+        elif leakage_gap > 0.5:
+            score -= 10
+            penalties.append(f"Look-ahead leakage gap {leakage_gap:.2f} > 0.5: -10")
+
+        # --- Low trade count penalty ---
+        if n_trades < 50:
+            score -= 10
+            penalties.append(f"Only {n_trades} trades (< 50): -10")
+        elif n_trades < 100:
+            score -= 5
+            penalties.append(f"Only {n_trades} trades (< 100): -5")
+
+        # --- Synthetic data circularity penalty ---
+        ts = self._filter(variant)
+        if ts:
+            synthetic_count = sum(1 for t in ts if getattr(t, 'price_source', 'synthetic') == 'synthetic')
+            synthetic_pct = synthetic_count / len(ts)
+            if synthetic_pct > 0.9:
+                score -= 15
+                penalties.append(
+                    f"Circular risk: {synthetic_pct:.0%} of trades use synthetic prices: -15"
+                )
+            elif synthetic_pct > 0.5:
+                score -= 10
+                penalties.append(
+                    f"Partial circular risk: {synthetic_pct:.0%} synthetic prices: -10"
+                )
+
+        score = max(0.0, score)
+        return score, penalties
+
+    @staticmethod
+    def robustness_verdict(score: float) -> str:
+        """Map robustness score to verdict label."""
+        if score >= 80:
+            return "ROBUST — strategy validated for paper trading"
+        elif score >= 60:
+            return "FRAGILE — strategy has weaknesses, investigate before deploying"
+        elif score >= 40:
+            return "WEAK — strategy likely has structural issues"
+        else:
+            return "BROKEN — do not deploy"
 
     def fragility_notes(self, variant: str) -> List[str]:
         """Return list of warning strings for weak segments."""
@@ -251,9 +425,43 @@ class BacktestScorecard:
 
         # Weak regimes
         by_regime = self.breakdown_by_regime(variant)
+        total = self.total_pnl(variant)
         for regime, stats in by_regime.items():
             if stats["trades"] >= 5 and stats["win_rate"] < 0.50:
                 notes.append(f"WEAK REGIME: {regime} win rate {stats['win_rate']:.1%} ({stats['trades']} trades)")
+            if total > 0 and stats["pnl"] / total > 0.40:
+                notes.append(
+                    f"CONCENTRATED REGIME: {regime} contributes {stats['pnl'] / total:.0%} of total PnL"
+                )
+            if stats["trades"] >= 10 and stats["pnl"] < 0:
+                notes.append(
+                    f"LOSING REGIME: {regime} PnL ${stats['pnl']:.2f} over {stats['trades']} trades"
+                )
+
+        # Month concentration
+        by_month = self.breakdown_by_month(variant)
+        for month, stats in by_month.items():
+            if total > 0 and stats["pnl"] / total > 0.35:
+                notes.append(
+                    f"CONCENTRATED MONTH: month {month} contributes {stats['pnl'] / total:.0%} of total PnL"
+                )
+            if stats["trades"] >= 5 and stats["pnl"] < 0:
+                notes.append(
+                    f"LOSING MONTH: month {month} PnL ${stats['pnl']:.2f} over {stats['trades']} trades"
+                )
+
+        # Price source distribution
+        ts = self._filter(variant)
+        if ts:
+            sources: Dict[str, int] = defaultdict(int)
+            for t in ts:
+                sources[getattr(t, 'price_source', 'synthetic')] += 1
+            for src, count in sorted(sources.items()):
+                pct = count / len(ts)
+                notes.append(f"PRICE SOURCE: {src} = {pct:.0%} ({count} trades)")
+            synthetic_pct = sources.get('synthetic', 0) / len(ts)
+            if synthetic_pct > 0.9:
+                notes.append("WARNING: >90% synthetic prices — results are circular, not trustworthy")
 
         return notes
 
@@ -292,6 +500,7 @@ class BacktestScorecard:
             ("BY HORIZON", self.breakdown_by_horizon(variant)),
             ("BY REGIME", self.breakdown_by_regime(variant)),
             ("BY SIDE", self.breakdown_by_side(variant)),
+            ("BY SOURCE", self.breakdown_by_source(variant)),
         ]:
             lines.append("")
             lines.append(f"  {label}")
@@ -308,6 +517,19 @@ class BacktestScorecard:
         lines.append("  FRAGILITY NOTES")
         for note in self.fragility_notes(variant):
             lines.append(f"  {note}")
+
+        # Robustness score
+        score, penalties = self.robustness_score(variant)
+        verdict = self.robustness_verdict(score)
+        lines.append("")
+        lines.append("  ROBUSTNESS ASSESSMENT")
+        lines.append(f"  Score:    {score:.0f} / 100")
+        lines.append(f"  Verdict:  {verdict}")
+        if penalties:
+            lines.append("")
+            lines.append("  Penalties:")
+            for p in penalties:
+                lines.append(f"    - {p}")
 
         lines.append("")
         lines.append(sep)

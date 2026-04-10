@@ -156,7 +156,9 @@ tr:hover td { background: rgba(0,255,65,0.03); }
   <div class="metric"><span class="label">Uptime</span><span class="value" id="uptime">--</span></div>
   <div class="metric"><span class="label">Cycle</span><span class="value" id="cycle">#--</span></div>
   <div class="metric"><span class="label">Bankroll</span><span class="value" id="bankroll">$--</span></div>
-  <div class="metric"><span class="label">Exposure</span><span class="value" id="exposure">$-- (--% )</span></div>
+  <div class="metric"><span class="label">Deployed</span><span class="value" id="deployed">$--</span></div>
+  <div class="metric"><span class="label">Pending</span><span class="value" id="exposure">$--</span></div>
+  <div class="metric"><span class="label">Available</span><span class="value" id="available">$--</span></div>
   <div class="metric"><span class="label">Daily PnL</span><span class="value" id="daily-pnl">$--</span></div>
   <div class="metric">
     <span class="label">Loss Cap</span>
@@ -266,8 +268,21 @@ function updateTopBar(data) {
   $('cycle').textContent = '#' + (data.cycle || 0);
   $('bankroll').textContent = fmtUsd(data.bankroll);
 
-  const expPct = data.bankroll > 0 ? (data.total_exposure / data.bankroll * 100).toFixed(1) : 0;
-  $('exposure').textContent = `${fmtUsd(data.total_exposure)} (${expPct}%)`;
+  // Deployed: total capital committed to filled positions
+  const deployed = data.total_deployed || 0;
+  const deployedEl = $('deployed');
+  deployedEl.textContent = fmtUsd(deployed);
+  deployedEl.style.color = deployed > 0 ? 'var(--green)' : '';
+
+  // Pending: capital still on the order book (open/unfilled orders)
+  const pending = data.total_exposure || 0;
+  $('exposure').textContent = fmtUsd(pending);
+
+  // Available: bankroll minus deployed and pending (floor at 0)
+  const available = Math.max(0, (data.bankroll || 0) - deployed - pending);
+  const availEl = $('available');
+  availEl.textContent = fmtUsd(available);
+  availEl.style.color = available < 50 ? 'var(--red)' : available < 150 ? 'var(--amber)' : '';
 
   const pnl = data.daily_pnl || 0;
   const pnlEl = $('daily-pnl');

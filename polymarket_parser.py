@@ -67,9 +67,10 @@ BUCKET_PATTERNS = [
     # "between X-Y°F" / "X-Y°F" / "X–Y°F" / "X to Y°F"
     (re.compile(r"(?:between\s+)?(\-?\d+)\s*(?:°?\s*[FC]?\s*)?(?:to|-|–)\s*(\-?\d+)\s*°?\s*[FC]?", re.I),
      lambda m: (float(m.group(1)), float(m.group(2)) + 1)),  # +1: "68-69°F" means [68, 70)
-    # Exact single temperature: "11°C" / "72°F" (binary: will it be exactly X?)
+    # Exact single temperature: "11°C" / "72°F" / "68" (binary: will it be exactly X?)
     # This is common in the new format — single degree bucket
-    (re.compile(r"^(\-?\d+)\s*°\s*[FC]?$", re.I),
+    # Fix: Made ° optional (°?) to catch bare number labels like "68" or "68F"
+    (re.compile(r"^(\-?\d+)\s*°?\s*[FC]?$", re.I),
      lambda m: (float(m.group(1)), float(m.group(1)) + 1)),  # "11°C" means [11, 12)
 ]
 

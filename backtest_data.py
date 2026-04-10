@@ -25,6 +25,7 @@ import aiohttp
 from api_utils import fetch_with_retry
 from config import cfg
 from polymarket_parser import _parse_bucket, _match_city, _extract_date, _detect_unit
+from price_history import PriceHistoryFetcher, PriceSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class HistoricalDataLoader:
         self._highs: Dict[Tuple[str, date], float] = {}
         self._climatology: Dict[str, Dict[int, float]] = {}
         self._gamma_markets: List[dict] = []
+        self._price_fetcher = PriceHistoryFetcher()
+        self._token_map: Dict[Tuple[str, date, str], str] = {}  # (city, date, label) -> token_id
 
     # ── NOAA Daily Highs ──────────────────────────────────────────────
 
@@ -328,4 +331,53 @@ class HistoricalDataLoader:
             if c == city and d == target_date and lo is not None:
                 label = item.get("groupItemTitle", f"bucket_{lo}_{hi}")
                 result[label] = price
+        return result if result else None
+
+    async def fetch_price_histories(
+        self, session: aiohttp.ClientSession, fidelity: int = 60
+    ) -> int:
+        """Fetch CLOB price histories for all closed temperature markets.
+
+        Also builds _token_map: (city, date, label) -> YES token ID
+        so get_decision_time_prices() can look up by city/date.
+        """
+        for item in self._gamma_markets:
+            city, mkt_date, lo, hi, price = self._parse_gamma_market(item)
+            if city is None or mkt_date is None:
+                continue
+
+            clob_ids = item.get("clobTokenIds", [])
+            if isinstance(clob_ids, str):
+                try:
+                    clob_ids = json.loads(clob_ids)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if not clob_ids:
+                continue
+
+            label = item.get("groupItemTitle", "")
+            if label:
+                self._token_map[(city, mkt_date, label)] = clob_ids[0]
+
+        return await self._price_fetcher.fetch_all_for_markets(
+            session, self._gamma_markets, fidelity
+        )
+
+    def get_decision_time_prices(
+        self, city: str, target_date: date, days_out: int
+    ) -> Optional[Dict[str, float]]:
+        """
+        Get real market prices at decision time for a city/date.
+
+        Returns: {outcome_label: price_yes} or None if no real data.
+        Decision time = target_date - days_out at noon UTC.
+        """
+        result: Dict[str, float] = {}
+        for (c, d, label), token_id in self._token_map.items():
+            if c == city and d == target_date:
+                price = self._price_fetcher.get_decision_time_price(
+                    token_id, target_date, days_out
+                )
+                if price is not None:
+                    result[label] = price
         return result if result else None

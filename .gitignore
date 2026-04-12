@@ -1,21 +1,25 @@
 # Environment
 .env
+.env*
+!.env.example
 __pycache__/
 *.pyc
 *.pyo
 
-# Logs
-logs/*.csv
-logs/*.log
+# Logs and Data
+logs/
+data/
 
-# IDE
+# IDE and Editor
+.claude/
 .vscode/
 .idea/
 *.swp
 
-# OS
+# OS and tools
 .DS_Store
 Thumbs.db
+.Rhistory
 
 # Virtual environments
 venv/

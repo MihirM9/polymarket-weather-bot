@@ -108,7 +108,7 @@ class BackgroundIOManager:
         write_header = bool(task.header and not task.path.exists())
         with open(task.path, "a", newline="") as handle:
             writer = csv.writer(handle)
-            if write_header:
+            if write_header and task.header is not None:
                 writer.writerow(task.header)
             writer.writerow(task.row)
 

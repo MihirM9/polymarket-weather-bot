@@ -20,10 +20,10 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from config import cfg, Config
+from config import Config, cfg
 from forecasting import CityForecast, bucket_probabilities
 
-from .markets import MarketOutcome, TemperatureMarket
+from .markets import TemperatureMarket
 
 logger = logging.getLogger(__name__)
 

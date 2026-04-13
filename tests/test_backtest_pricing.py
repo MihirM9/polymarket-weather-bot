@@ -1,8 +1,11 @@
 # tests/test_backtest_pricing.py
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import random
+
 
 def test_tail_buckets_overpriced():
     """Tail buckets should have prices higher than true probabilities."""

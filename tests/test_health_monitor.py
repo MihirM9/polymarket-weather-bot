@@ -1,7 +1,9 @@
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from health_monitor import HealthMonitor
+from infrastructure.health import HealthMonitor
 
 
 def test_health_monitor_triggers_fail_safe_on_consecutive_cycle_failures():
@@ -26,3 +28,15 @@ def test_health_monitor_resets_dashboard_export_failure_counter():
 
     monitor.record_dashboard_export(True)
     assert monitor.fail_safe_reason() is None
+
+
+def test_health_monitor_triggers_fail_safe_on_repeated_dashboard_export_failure():
+    monitor = HealthMonitor()
+
+    monitor.record_dashboard_export(False)
+    monitor.record_dashboard_export(False)
+    monitor.record_dashboard_export(False)
+
+    reason = monitor.fail_safe_reason()
+    assert reason is not None
+    assert "Dashboard state export failed" in reason

@@ -1,7 +1,9 @@
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api_models import GammaMarketWire, NWSPointsResponse, validate_model
+from infrastructure.models import GammaMarketWire, NWSPointsResponse, validate_model
 
 
 def test_gamma_market_wire_parses_stringified_lists():

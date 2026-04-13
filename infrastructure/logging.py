@@ -12,13 +12,14 @@ import sys
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 from queue import SimpleQueue
+from typing import Any
 
 
 def configure_logging(log_path: str | Path) -> QueueListener:
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    queue = SimpleQueue()
+    queue: SimpleQueue[Any] = SimpleQueue()
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()

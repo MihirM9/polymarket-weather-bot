@@ -13,11 +13,10 @@ The realistic variant is the primary test. The gap between realistic
 and optimistic quantifies how much look-ahead leakage would help.
 """
 
-import math
 import random
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 from forecasting import compute_confidence
 

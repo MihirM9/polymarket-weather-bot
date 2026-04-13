@@ -16,19 +16,17 @@ The decision engine now uses realized_exposure (what actually filled) instead of
 intended_exposure (what we hoped would fill) for all risk cap calculations.
 """
 
-import asyncio
 import csv
 import json
 import logging
-import os
 import warnings
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import cfg, Config
+from config import Config, cfg
 from infrastructure.io import default_io_manager
 from infrastructure.models import ClobOrderStatusResponse, validate_model
 
@@ -490,7 +488,6 @@ class PositionTracker:
                 # py-clob-client returns: status, size_matched, price, etc.
                 clob_status = parsed_resp.status.lower()
                 size_matched = parsed_resp.size_matched or 0.0
-                original_size = parsed_resp.original_size or 0.0
                 avg_price = (
                     parsed_resp.associate_trades_avg_price
                     or parsed_resp.price

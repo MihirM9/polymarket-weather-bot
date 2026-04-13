@@ -1,12 +1,14 @@
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date, timedelta
 
 from backtest_tracker import MockTracker
-from decision_engine import DecisionEngine
-from forecast_scanner import CityForecast
-from polymarket_parser import MarketOutcome, TemperatureMarket
+from forecasting import CityForecast
+from trading.decision import DecisionEngine
+from trading.markets import MarketOutcome, TemperatureMarket
 
 
 def test_decision_engine_generates_signal_for_clear_edge():
@@ -83,3 +85,10 @@ def test_decision_engine_skips_duplicate_active_order():
     signals = engine.evaluate([(market, forecast)], tracker=tracker)
 
     assert signals == []
+
+
+def test_decision_engine_shuts_down_after_daily_loss_cap_breach():
+    engine = DecisionEngine()
+    engine.update_pnl(-(engine.config.daily_loss_cap + 0.01))
+
+    assert engine.is_shutdown() is True

@@ -20,6 +20,7 @@ data/
 .DS_Store
 Thumbs.db
 .Rhistory
+.hypothesis/
 
 # Virtual environments
 venv/

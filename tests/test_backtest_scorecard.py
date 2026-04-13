@@ -1,8 +1,11 @@
 # tests/test_backtest_scorecard.py
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date
+
 
 def _make_trade(city, target_date, days_out, side, price, size, won, pnl, variant="realistic"):
     from backtest_scorecard import BacktestTrade

@@ -8,10 +8,9 @@ from __future__ import annotations
 import csv
 import math
 from collections import defaultdict
-from dataclasses import dataclass, fields, asdict
+from dataclasses import asdict, dataclass, fields
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-
+from typing import Any, Callable, Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
 # Data classes

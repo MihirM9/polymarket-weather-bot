@@ -1,9 +1,11 @@
 # tests/test_backtester.py
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import random
 from datetime import date
+
 
 def test_backtest_engine_produces_trades():
     """Integration test: engine should produce trades from synthetic data."""

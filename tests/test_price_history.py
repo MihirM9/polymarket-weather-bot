@@ -1,15 +1,13 @@
 # tests/test_price_history.py
 """Tests for PriceHistoryFetcher — CLOB price history retrieval and caching."""
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import tempfile
-from datetime import datetime, timezone, date
-from unittest.mock import AsyncMock, patch, MagicMock
-
-import pytest
+from datetime import date, datetime
 
 from price_history import PriceHistoryFetcher, PriceSnapshot
 

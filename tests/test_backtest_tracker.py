@@ -1,8 +1,9 @@
 # tests/test_backtest_tracker.py
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datetime import date
 
 def test_mock_tracker_enforces_per_market_cap():
     from backtest_tracker import MockTracker

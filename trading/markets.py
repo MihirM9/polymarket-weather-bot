@@ -20,17 +20,19 @@ New format: each bucket = its own binary market with outcomes=["Yes","No"],
 """
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import aiohttp
 
 from infrastructure.http import fetch_with_retry
 from infrastructure.models import GammaMarketWire, validate_model
+
+if TYPE_CHECKING:
+    from forecasting import CityForecast
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +213,7 @@ class PolymarketParser:
         self._failed_labels = []
 
         # Collect individual binary temperature markets
-        raw_markets: Dict[str, dict] = {}  # market_id -> market data
+        raw_markets: Dict[str, GammaMarketWire] = {}  # market_id -> market data
 
         async with aiohttp.ClientSession() as session:
             # Method 1: Volume-sorted (catches most active temperature markets)
@@ -363,8 +365,8 @@ class PolymarketParser:
             if unit == "F":
                 # Check if any sibling bucket label contains °C
                 for sib_check in siblings:
-                    gt = sib_check.get("groupItemTitle", "")
-                    sq = sib_check.get("question", "")
+                    gt = sib_check.groupItemTitle
+                    sq = sib_check.question
                     if _detect_unit(gt) == "C" or _detect_unit(sq) == "C":
                         unit = "C"
                         break
@@ -516,25 +518,23 @@ class PolymarketParser:
     def match_forecasts(
         self,
         markets: List[TemperatureMarket],
-        forecasts,  # List[CityForecast] — avoid circular import
-    ) -> List[Tuple["TemperatureMarket", "CityForecast"]]:
+        forecasts: List["CityForecast"],
+    ) -> List[Tuple[TemperatureMarket, "CityForecast"]]:
         """
         Match markets to forecasts by city and date.
         Returns list of (market, forecast) pairs.
         """
-        from forecasting import CityForecast
-
         forecast_map: Dict[str, CityForecast] = {}
         for fc in forecasts:
             key = f"{fc.city}_{fc.forecast_date.isoformat()}"
             forecast_map[key] = fc
 
-        matches = []
+        matches: List[Tuple[TemperatureMarket, CityForecast]] = []
         for mkt in markets:
             key = f"{mkt.city}_{mkt.market_date.isoformat()}"
-            fc = forecast_map.get(key)
-            if fc:
-                matches.append((mkt, fc))
+            forecast = forecast_map.get(key)
+            if forecast is not None:
+                matches.append((mkt, forecast))
             else:
                 logger.debug(f"No forecast match for market: {mkt.city} {mkt.market_date}")
 

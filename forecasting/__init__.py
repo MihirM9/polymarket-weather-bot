@@ -6,9 +6,8 @@ path so the app can reason about "forecasting" as one subsystem.
 """
 
 from .blender import EnsembleBlender, EnsembleForecast, ForecastPoint
-from .scanner import CityForecast, ForecastScanner, bucket_probabilities, compute_confidence
 from .metar import MetarFetcher, MetarObservation
-
+from .scanner import CityForecast, ForecastScanner, bucket_probabilities, compute_confidence
 from .service import ForecastingService
 
 __all__ = [

@@ -14,18 +14,16 @@ import asyncio
 import csv
 import json
 import logging
-import re
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-from config import cfg
 from infrastructure.http import fetch_with_retry
-from trading.markets import _parse_bucket, _match_city, _extract_date, _detect_unit
-from price_history import PriceHistoryFetcher, PriceSnapshot
+from price_history import PriceHistoryFetcher
+from trading.markets import _detect_unit, _extract_date, _match_city, _parse_bucket
 
 logger = logging.getLogger(__name__)
 

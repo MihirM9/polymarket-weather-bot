@@ -15,7 +15,6 @@ Lifecycle:
 """
 
 import csv
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -159,16 +158,14 @@ class ResolutionTracker:
             logger.warning(f"No NOAA station configured for {city}")
             return None
 
-        # Fetch observations covering the full local day (midnight to midnight).
-        # Convert city local midnight to UTC using the city's offset.
-        offset_hours = cfg.CITY_UTC_OFFSETS.get(city, -5)
-        # Local midnight = UTC midnight - offset (e.g., EST midnight = 5 AM UTC)
-        local_midnight_utc = datetime(
-            target_date.year, target_date.month, target_date.day,
-            0, 0, tzinfo=timezone.utc
-        ) - timedelta(hours=offset_hours)
-        start = local_midnight_utc
-        end = start + timedelta(hours=24)
+        # Fetch observations covering the full city-local day (midnight to midnight),
+        # then convert that window to UTC so DST transitions are handled correctly.
+        local_tz = cfg.city_zoneinfo(city)
+        local_midnight = datetime(
+            target_date.year, target_date.month, target_date.day, 0, 0, tzinfo=local_tz
+        )
+        start = local_midnight.astimezone(timezone.utc)
+        end = (local_midnight + timedelta(hours=24)).astimezone(timezone.utc)
 
         # Fix: NWS API rejects Python's +00:00 UTC suffix with 400 Bad Request.
         # Must use ISO 8601 'Z' suffix instead.

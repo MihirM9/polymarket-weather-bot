@@ -3,14 +3,20 @@ analyze_trades.py — Post-hoc trade analysis with actual NWS observations
 Reads logs/trades.csv, fetches observed highs, determines win/loss, prints summary.
 Usage: python3 analyze_trades.py
 """
-import asyncio, csv, logging, re, sys
+import asyncio
+import csv
+import logging
+import re
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
 import aiohttp
-from infrastructure.http import fetch_with_retry
+
 from config import cfg
+from infrastructure.http import fetch_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)

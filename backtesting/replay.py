@@ -23,23 +23,23 @@ import argparse
 import asyncio
 import logging
 import random
-import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-from .data import HistoricalDataLoader
-from .forecast import HistoricalForecastApproximator, SyntheticForecast
-from .pricing import MispricingModel
-from .scorecard import BacktestScorecard, BacktestTrade, SensitivityAnalyzer
-from .tracker import MockTracker
 from config import cfg
 from forecasting import CityForecast, bucket_probabilities
 from trading.decision import DecisionEngine, TradeSignal
 from trading.markets import MarketOutcome, TemperatureMarket, _parse_bucket
 from trading.resolution import ResolutionTracker
+
+from .data import HistoricalDataLoader
+from .forecast import HistoricalForecastApproximator
+from .pricing import MispricingModel
+from .scorecard import BacktestScorecard, BacktestTrade, SensitivityAnalyzer
+from .tracker import MockTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -685,7 +685,7 @@ def main():
             print(f"  OOS / IS ratio:          {oos_ratio:.1%}")
         else:
             oos_ratio = 0.0
-            print(f"  OOS / IS ratio:          N/A (IS Sharpe <= 0)")
+            print("  OOS / IS ratio:          N/A (IS Sharpe <= 0)")
 
         print(f"  Leakage gap (opt-real):  {leakage_gap:.2f}")
 

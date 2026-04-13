@@ -18,19 +18,19 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timezone
+from typing import Dict, List, Optional, Tuple, cast
 
 import aiohttp
 
+from config import Config, cfg
+from infrastructure.http import fetch_with_retry
 from infrastructure.models import (
     NWSForecastResponse,
     NWSLatestObservationResponse,
     NWSPointsResponse,
     validate_model,
 )
-from infrastructure.http import fetch_with_retry
-from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +333,7 @@ class ForecastScanner:
             if isinstance(res, Exception):
                 logger.error(f"Forecast scan exception: {res}")
                 continue
-            forecasts.extend(res)
+            forecasts.extend(cast(List[CityForecast], res))
 
         logger.info(f"Forecast scan complete: {len(forecasts)} city-date pairs across {len(self.config.cities)} cities")
         return forecasts

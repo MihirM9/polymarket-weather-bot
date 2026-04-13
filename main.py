@@ -35,21 +35,20 @@ Architecture (v5):
 """
 
 import asyncio
-import json
 import logging
 import signal
-import sys
 from dataclasses import dataclass
-from datetime import datetime, date as date_type, timezone
+from datetime import date as date_type
+from datetime import datetime, timezone
 from typing import Optional
 
 from config import cfg
-from forecasting import ForecastScanner, EnsembleBlender, MetarFetcher, ForecastingService
+from forecasting import EnsembleBlender, ForecastingService, ForecastScanner, MetarFetcher
 from infrastructure.health import HealthMonitor
 from infrastructure.io import default_io_manager
 from infrastructure.logging import configure_logging
 from trading.decision import DecisionEngine
-from trading.execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
+from trading.execution import OrderExecutor, PerformanceTracker, TelegramAlerter, TradeLogger
 from trading.markets import PolymarketParser
 from trading.positions import OrderStatus, PositionTracker
 from trading.resolution import ResolutionTracker
@@ -318,8 +317,8 @@ async def main():
     logger.info(f"  Cities: {', '.join(cfg.cities)}")
     logger.info(f"  Scan interval: {cfg.scan_interval_sec}s")
     logger.info(f"  Ensemble blending: {'enabled' if EnsembleBlender().enabled else 'disabled (no OWM key)'}")
-    logger.info(f"  Fill tracking: enabled")
-    logger.info(f"  Resolution tracking: enabled")
+    logger.info("  Fill tracking: enabled")
+    logger.info("  Resolution tracking: enabled")
     logger.info("=" * 60)
 
     # Initialize all components

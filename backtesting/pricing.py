@@ -11,9 +11,8 @@ observed in real Polymarket temperature markets:
 Calibrated from real Gamma API closed market data.
 """
 
-import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Tuple
 
 

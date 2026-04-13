@@ -7,9 +7,11 @@ Uses pydantic to reduce silent failures when upstream API payloads drift.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Self, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError, validator
+
+ModelT = TypeVar("ModelT", bound="APIModel")
 
 
 class APIModel(BaseModel):
@@ -17,10 +19,10 @@ class APIModel(BaseModel):
         extra = "ignore"
 
     @classmethod
-    def model_validate(cls, data: Any):
+    def model_validate(cls, data: Any) -> Self:
         return cls.parse_obj(data)
 
-    def model_dump(self) -> dict:
+    def model_dump(self) -> dict[str, Any]:
         return self.dict()
 
 
@@ -128,7 +130,7 @@ class ClobOrderStatusResponse(APIModel):
         return float(value)
 
 
-def validate_model(data: Any, model: type[APIModel], *, label: str) -> Optional[APIModel]:
+def validate_model(data: Any, model: type[ModelT], *, label: str) -> Optional[ModelT]:
     try:
         return model.model_validate(data)
     except ValidationError as exc:

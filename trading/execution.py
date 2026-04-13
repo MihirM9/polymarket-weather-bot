@@ -16,17 +16,17 @@ import math
 import os
 import uuid
 from collections import deque
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Deque, List, Optional
 
 import aiohttp
 
-from config import cfg, Config
+from config import Config, cfg
 from infrastructure.io import default_io_manager
 
 from .decision import TradeSignal
-from .dry_run import DryRunSimulator, DryRunFillTracker
+from .dry_run import DryRunFillTracker, DryRunSimulator
 from .positions import OpenOrder, OrderStatus, PositionTracker
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class TelegramAlerter:
 
     def __init__(self, config: Config = cfg):
         self.config = config
-        self._recent_trades = deque(maxlen=20)
+        self._recent_trades: Deque[dict[str, Any]] = deque(maxlen=20)
         self.token = config.telegram_token
         self.chat_id = config.telegram_chat_id
         self.enabled = bool(self.token and self.chat_id)
@@ -164,7 +164,7 @@ class TradeLogger:
 
     def __init__(self, config: Config = cfg):
         self.config = config
-        self._recent_trades = deque(maxlen=20)
+        self._recent_trades: Deque[dict[str, Any]] = deque(maxlen=20)
 
     def log_trade(
         self,
@@ -504,6 +504,10 @@ class OrderExecutor:
         if not self._check_orderbook_depth(signal):
             return None
 
+        client = self.client
+        if client is None:
+            return None
+
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY, SELL
@@ -527,8 +531,8 @@ class OrderExecutor:
                 side=side,
             )
 
-            signed_order = self.client.create_and_sign_order(order_args)
-            resp = self.client.post_order(signed_order, OrderType.GTC)
+            signed_order = client.create_and_sign_order(order_args)
+            resp = client.post_order(signed_order, OrderType.GTC)
 
             if resp and resp.get("success"):
                 order_id = resp.get("orderID", resp.get("order_id",

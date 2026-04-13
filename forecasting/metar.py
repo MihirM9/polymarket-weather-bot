@@ -21,11 +21,11 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import aiohttp
 
-from config import cfg, Config
+from config import Config, cfg
 
 logger = logging.getLogger(__name__)
 

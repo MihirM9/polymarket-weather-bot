@@ -1,13 +1,15 @@
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
 from datetime import date, datetime, timezone
 
-from decision_engine import TradeSignal
-from dry_run_simulator import OrderbookSnapshot, SimulatedFill
-from execution import OrderExecutor, TradeLogger
-from position_tracker import PositionTracker
+from trading.decision import TradeSignal
+from trading.dry_run import OrderbookSnapshot, SimulatedFill
+from trading.execution import OrderExecutor, TradeLogger
+from trading.positions import OpenOrder, OrderStatus, PositionTracker
 
 
 def test_trade_logger_keeps_recent_trades():
@@ -92,3 +94,36 @@ def test_order_executor_uses_simulated_fill_metadata(monkeypatch):
     assert order.simulated_is_maker is True
     assert order.simulated_fill_ratio == 1.0
     assert tracker.total_exposure >= 5.0
+
+
+def test_poll_fills_ignores_malformed_clob_payload(monkeypatch):
+    monkeypatch.setattr(PositionTracker, "_load_state", lambda self: None)
+    tracker = PositionTracker()
+
+    class BadClient:
+        def get_order(self, order_id):
+            return {"status": "filled", "size_matched": "not-a-number"}
+
+        def cancel(self, order_id):
+            raise AssertionError("cancel should not be called")
+
+    tracker.set_clob_client(BadClient())
+    order = OpenOrder(
+        order_id="ord-bad",
+        token_id="tok1",
+        market_id="mkt1",
+        city="Miami",
+        market_date=date(2026, 4, 12),
+        outcome_label="80-81°F",
+        side="BUY",
+        intended_size_usd=5.0,
+        limit_price=0.41,
+        submitted_at=datetime.now(timezone.utc),
+        status=OrderStatus.PENDING,
+    )
+    tracker.register_order(order)
+
+    changed = asyncio.run(tracker.poll_fills())
+
+    assert changed == 0
+    assert tracker._orders["ord-bad"].status == OrderStatus.PENDING

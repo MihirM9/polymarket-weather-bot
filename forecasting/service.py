@@ -12,7 +12,7 @@ from typing import Dict, List
 
 import aiohttp
 
-from config import cfg, Config
+from config import Config, cfg
 
 from .blender import EnsembleBlender
 from .metar import MetarFetcher

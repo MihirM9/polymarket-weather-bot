@@ -26,13 +26,13 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from config import Config, cfg
 from infrastructure.http import fetch_with_retry
-from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 

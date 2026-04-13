@@ -1,13 +1,13 @@
 # tests/test_price_replay_integration.py
 """Integration test: full backtest with mocked CLOB price histories."""
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import date, datetime, timezone
 
-from backtest_scorecard import BacktestScorecard
 from backtester import BacktestEngine
 from price_history import PriceSnapshot
 

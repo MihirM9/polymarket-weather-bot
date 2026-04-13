@@ -43,16 +43,16 @@ from dataclasses import dataclass
 from datetime import datetime, date as date_type, timezone
 from typing import Optional
 
-from background_io import default_io_manager
 from config import cfg
 from forecasting import ForecastScanner, EnsembleBlender, MetarFetcher, ForecastingService
-from health_monitor import HealthMonitor
-from polymarket_parser import PolymarketParser
-from decision_engine import DecisionEngine
-from position_tracker import PositionTracker, OrderStatus
-from execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
-from resolution_tracker import ResolutionTracker
-from runtime_logging import configure_logging
+from infrastructure.health import HealthMonitor
+from infrastructure.io import default_io_manager
+from infrastructure.logging import configure_logging
+from trading.decision import DecisionEngine
+from trading.execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
+from trading.markets import PolymarketParser
+from trading.positions import OrderStatus, PositionTracker
+from trading.resolution import ResolutionTracker
 
 # ── Logging ──
 
@@ -386,7 +386,7 @@ async def main():
             # Resolution check: every 10 cycles (~20 min), score past-date trades
             if cycle_count % 10 == 0:
                 try:
-                    from execution import TRADE_LOG
+                    from trading.execution import TRADE_LOG
                     newly_resolved = await resolution_tracker.resolve_pending_trades(TRADE_LOG)
                     if newly_resolved:
                         # Feed real P&L into decision engine

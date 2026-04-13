@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from api_utils import fetch_with_retry
+from infrastructure.http import fetch_with_retry
 
 logger = logging.getLogger("price_history")
 

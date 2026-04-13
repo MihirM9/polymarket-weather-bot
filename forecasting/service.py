@@ -13,9 +13,10 @@ from typing import Dict, List
 import aiohttp
 
 from config import cfg, Config
-from forecast_scanner import CityForecast, ForecastScanner, compute_confidence
-from ensemble_blender import EnsembleBlender
-from metar_fetcher import MetarFetcher
+
+from .blender import EnsembleBlender
+from .metar import MetarFetcher
+from .scanner import CityForecast, ForecastScanner, compute_confidence
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import aiohttp
-from api_utils import fetch_with_retry
+from infrastructure.http import fetch_with_retry
 from config import cfg
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

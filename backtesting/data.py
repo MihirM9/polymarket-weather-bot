@@ -22,9 +22,9 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-from api_utils import fetch_with_retry
 from config import cfg
-from polymarket_parser import _parse_bucket, _match_city, _extract_date, _detect_unit
+from infrastructure.http import fetch_with_retry
+from trading.markets import _parse_bucket, _match_city, _extract_date, _detect_unit
 from price_history import PriceHistoryFetcher, PriceSnapshot
 
 logger = logging.getLogger(__name__)

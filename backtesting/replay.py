@@ -36,10 +36,10 @@ from .pricing import MispricingModel
 from .scorecard import BacktestScorecard, BacktestTrade, SensitivityAnalyzer
 from .tracker import MockTracker
 from config import cfg
-from decision_engine import DecisionEngine, TradeSignal
-from forecast_scanner import CityForecast, bucket_probabilities
-from polymarket_parser import TemperatureMarket, MarketOutcome, _parse_bucket
-from resolution_tracker import ResolutionTracker
+from forecasting import CityForecast, bucket_probabilities
+from trading.decision import DecisionEngine, TradeSignal
+from trading.markets import MarketOutcome, TemperatureMarket, _parse_bucket
+from trading.resolution import ResolutionTracker
 
 logging.basicConfig(
     level=logging.INFO,

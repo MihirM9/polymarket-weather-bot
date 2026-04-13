@@ -21,9 +21,9 @@ exclude = ["venv", "docs/plans"]
 files = [
     "main.py",
     "config.py",
-    "decision_engine.py",
-    "execution.py",
-    "position_tracker.py",
     "forecasting",
     "backtesting",
+    "trading",
+    "infrastructure",
+    "price_history.py",
 ]

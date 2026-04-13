@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, Optional, Tuple
 
-from forecast_scanner import compute_confidence
+from forecasting import compute_confidence
 
 HORIZON_SIGMA = {
     0: 1.5, 1: 2.0, 2: 2.5, 3: 3.0, 4: 3.8, 5: 4.5, 6: 5.3, 7: 6.0,

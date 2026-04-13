@@ -4,10 +4,26 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["venv", "docs/plans"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_configs = true
 check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
 exclude = ["venv", "docs/plans"]
+files = [
+    "main.py",
+    "config.py",
+    "decision_engine.py",
+    "execution.py",
+    "position_tracker.py",
+    "forecasting",
+    "backtesting",
+]

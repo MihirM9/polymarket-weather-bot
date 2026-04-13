@@ -30,14 +30,23 @@ def test_trade_logger_keeps_recent_trades():
         price_limit=0.41,
         rationale="test signal",
     )
+    order = OpenOrder(
+        order_id="ord1",
+        token_id="tok1",
+        market_id="mkt1",
+        city="Miami",
+        market_date=date(2026, 4, 12),
+        outcome_label="80-81°F",
+        side="BUY",
+        intended_size_usd=5.0,
+        limit_price=0.41,
+        submitted_at=datetime.now(timezone.utc),
+        status=OrderStatus.FILLED,
+        filled_size_usd=5.0,
+        avg_fill_price=0.41,
+    )
 
-    class DummyOrder:
-        order_id = "ord1"
-        status = type("Status", (), {"value": "filled"})()
-        filled_size_usd = 5.0
-        avg_fill_price = 0.41
-
-    logger.log_trade(signal, DummyOrder(), True, slippage=0.0, fill_ratio=1.0, is_maker=True, book_depth=10.0)
+    logger.log_trade(signal, order, True, slippage=0.0, fill_ratio=1.0, is_maker=True, book_depth=10.0)
 
     recent = logger.recent_trades
     assert len(recent) == 1

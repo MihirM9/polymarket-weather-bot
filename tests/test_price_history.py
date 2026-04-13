@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tempfile
 from datetime import date, datetime
 
-from price_history import PriceHistoryFetcher, PriceSnapshot
+from backtesting import PriceHistoryFetcher, PriceSnapshot
 
 
 class TestPriceSnapshot:

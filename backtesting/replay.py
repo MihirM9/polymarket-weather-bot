@@ -25,7 +25,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 import aiohttp
 
@@ -162,7 +162,7 @@ class BacktestEngine:
             )
 
         # Priority 3: Synthetic prices (fallback)
-        buckets = self._select_buckets(forecast_high)
+        buckets = list(self._select_buckets(forecast_high))
         true_probs = bucket_probabilities(
             forecast_high, forecast_sigma, buckets
         )
@@ -197,7 +197,7 @@ class BacktestEngine:
 
     def _select_buckets(
         self, forecast_high: float
-    ) -> List[Tuple[Optional[float], Optional[float]]]:
+    ) -> Sequence[Tuple[Optional[float], Optional[float]]]:
         """Select a subset of standard buckets centered on the forecast."""
         center_idx = 0
         for i, (lo, hi) in enumerate(STANDARD_BUCKETS):
@@ -216,7 +216,7 @@ class BacktestEngine:
 
         start = max(0, center_idx - 4)
         end = min(len(STANDARD_BUCKETS), center_idx + 5)
-        return STANDARD_BUCKETS[start:end]
+        return cast(Sequence[Tuple[Optional[float], Optional[float]]], STANDARD_BUCKETS[start:end])
 
     @staticmethod
     def _bucket_label(lo: Optional[float], hi: Optional[float]) -> str:
@@ -435,6 +435,8 @@ class BacktestEngine:
                             else:
                                 price_source = "synthetic"
 
+                            if bucket_lo is None or bucket_hi is None:
+                                continue
                             result.record(BacktestTrade(
                                 city=city,
                                 target_date=current,
@@ -568,14 +570,14 @@ def main():
             logger.info("No real price data for calibration — using defaults")
     elif engine.loader._gamma_markets:
         logger.info("Calibrating mispricing model from Gamma final prices (fallback)...")
-        cal_data = []
+        fallback_cal_data: list[tuple[float, float, float]] = []
         for item in engine.loader._gamma_markets:
-            city_name, mkt_date, lo, hi, price = engine.loader._parse_gamma_market(item)
-            if city_name and lo is not None:
+            parsed_city_name, parsed_market_date, lo, hi, price = engine.loader._parse_gamma_market(item)
+            if parsed_city_name is not None and parsed_market_date is not None and lo is not None:
                 pos = 0.5
-                cal_data.append((pos, price, 0.0))
-        if cal_data:
-            engine.pricing.calibrate(cal_data)
+                fallback_cal_data.append((pos, price, 0.0))
+        if fallback_cal_data:
+            engine.pricing.calibrate(fallback_cal_data)
             logger.info(
                 f"Calibrated: tail_overpricing={engine.pricing.tail_overpricing:.3f}, "
                 f"mode_underpricing={engine.pricing.mode_underpricing:.3f}"
@@ -740,7 +742,7 @@ def main():
             analyzer = SensitivityAnalyzer()
             sharpe_values_no_oos: List[float] = []
             for param, values in analyzer.SWEEPS.items():
-                sweep_results: Dict = {}
+                sweep_results_no_oos: Dict = {}
                 for val in values:
                     original = getattr(cfg, param, None)
                     if original is not None:
@@ -753,7 +755,7 @@ def main():
                         sweep_sc = BacktestScorecard(sweep_result.trades)
                         sr_val = sweep_sc.sharpe_ratio("realistic")
                         sharpe_values_no_oos.append(sr_val)
-                        sweep_results[val] = {
+                        sweep_results_no_oos[val] = {
                             "sharpe": sr_val,
                             "win_rate": sweep_sc.win_rate("realistic"),
                             "max_dd": sweep_sc.max_drawdown("realistic"),
@@ -763,7 +765,7 @@ def main():
                         setattr(cfg, param, original)
 
                 current = getattr(cfg, param, 0)
-                print(analyzer.render_sweep_result(param, sweep_results, current))
+                print(analyzer.render_sweep_result(param, sweep_results_no_oos, current))
                 print()
 
             if len(sharpe_values_no_oos) >= 2:

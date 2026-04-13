@@ -8,8 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import date, datetime, timezone
 
-from backtester import BacktestEngine
-from price_history import PriceSnapshot
+from backtesting import BacktestEngine, PriceSnapshot
 
 
 def test_real_price_replay_produces_trades():

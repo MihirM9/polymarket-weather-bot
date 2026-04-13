@@ -9,7 +9,7 @@ from datetime import date
 
 def test_backtest_engine_produces_trades():
     """Integration test: engine should produce trades from synthetic data."""
-    from backtester import BacktestEngine
+    from backtesting import BacktestEngine
 
     engine = BacktestEngine(bankroll=500.0, seed=42)
 
@@ -36,7 +36,7 @@ def test_backtest_engine_produces_trades():
 
 def test_backtest_deduplication():
     """Engine should not re-enter same market+bucket across horizons."""
-    from backtester import BacktestEngine
+    from backtesting import BacktestEngine
 
     engine = BacktestEngine(bankroll=500.0, seed=42)
 
@@ -65,7 +65,7 @@ def test_backtest_deduplication():
 
 def test_backtest_scoring_correct():
     """Verify BUY YES wins when actual temp is in bucket."""
-    from backtester import BacktestEngine
+    from backtesting import BacktestEngine
 
     engine = BacktestEngine(bankroll=500.0, seed=42)
 

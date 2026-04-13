@@ -9,7 +9,7 @@ from datetime import date
 
 def test_parse_noaa_observation_response():
     """Test parsing of NWS observations API response format."""
-    from backtest_data import HistoricalDataLoader
+    from backtesting import HistoricalDataLoader
     loader = HistoricalDataLoader(data_dir="/tmp/backtest_test_data")
 
     mock_response = {
@@ -25,13 +25,13 @@ def test_parse_noaa_observation_response():
     assert abs(result - 86.0) < 0.1
 
 def test_parse_noaa_empty_response():
-    from backtest_data import HistoricalDataLoader
+    from backtesting import HistoricalDataLoader
     loader = HistoricalDataLoader(data_dir="/tmp/backtest_test_data")
     assert loader._extract_max_temp({"features": []}) is None
     assert loader._extract_max_temp({}) is None
 
 def test_cache_write_and_read(tmp_path):
-    from backtest_data import HistoricalDataLoader
+    from backtesting import HistoricalDataLoader
     loader = HistoricalDataLoader(data_dir=str(tmp_path))
 
     loader._cache_daily_high("Miami", date(2025, 7, 15), 91.2)
@@ -42,7 +42,7 @@ def test_cache_write_and_read(tmp_path):
     assert cached[("Miami", date(2025, 7, 16))] == 89.5
 
 def test_climatology_lookup():
-    from backtest_data import HistoricalDataLoader
+    from backtesting import HistoricalDataLoader
     loader = HistoricalDataLoader(data_dir="/tmp/backtest_test_data")
 
     loader._climatology = {
@@ -55,7 +55,7 @@ def test_climatology_lookup():
 
 def test_gamma_market_parsing():
     """Test parsing of closed Gamma API temperature market."""
-    from backtest_data import HistoricalDataLoader
+    from backtesting import HistoricalDataLoader
     loader = HistoricalDataLoader(data_dir="/tmp/backtest_test_data")
 
     mock_market = {

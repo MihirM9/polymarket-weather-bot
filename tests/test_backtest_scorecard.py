@@ -8,7 +8,7 @@ from datetime import date
 
 
 def _make_trade(city, target_date, days_out, side, price, size, won, pnl, variant="realistic"):
-    from backtest_scorecard import BacktestTrade
+    from backtesting import BacktestTrade
     return BacktestTrade(
         city=city, target_date=target_date, days_out=days_out,
         side=side, outcome_label="72-73°F", bucket_low=72, bucket_high=74,
@@ -19,7 +19,7 @@ def _make_trade(city, target_date, days_out, side, price, size, won, pnl, varian
     )
 
 def test_win_rate():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("Miami", date(2025, 1, 1), 3, "BUY", 0.30, 10, True, 5.0),
@@ -30,7 +30,7 @@ def test_win_rate():
     assert abs(sc.win_rate("realistic") - 2/3) < 0.01
 
 def test_max_drawdown():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("NY", date(2025, 1, 1), 3, "BUY", 0.30, 10, True, 10.0),
@@ -43,7 +43,7 @@ def test_max_drawdown():
     assert sc.max_drawdown("realistic") == 25.0
 
 def test_profit_factor():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("LA", date(2025, 1, 1), 3, "BUY", 0.30, 10, True, 20.0),
@@ -53,7 +53,7 @@ def test_profit_factor():
     assert abs(sc.profit_factor("realistic") - 2.0) < 0.01
 
 def test_breakdown_by_city():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("Miami", date(2025, 1, 1), 3, "BUY", 0.30, 10, True, 5.0),
@@ -67,7 +67,7 @@ def test_breakdown_by_city():
     assert by_city["New York"]["win_rate"] == 0.0
 
 def test_breakdown_by_horizon():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("Miami", date(2025, 1, 1), 0, "BUY", 0.30, 10, True, 5.0),
@@ -80,7 +80,7 @@ def test_breakdown_by_horizon():
     assert by_horizon[5]["win_rate"] == 0.0
 
 def test_variant_comparison():
-    from backtest_scorecard import BacktestScorecard
+    from backtesting import BacktestScorecard
 
     trades = [
         _make_trade("Miami", date(2025, 1, 1), 3, "BUY", 0.30, 10, True, 5.0, "realistic"),

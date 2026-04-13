@@ -26,6 +26,7 @@ async def fetch_with_retry(
     url: str,
     *,
     headers: Optional[dict] = None,
+    params: Optional[dict] = None,
     timeout_sec: float = 15.0,
     max_retries: int = DEFAULT_MAX_RETRIES,
     backoff_base: float = DEFAULT_BACKOFF_BASE,
@@ -42,7 +43,7 @@ async def fetch_with_retry(
 
     for attempt in range(1, max_retries + 1):
         try:
-            async with session.get(url, headers=headers, timeout=timeout) as resp:
+            async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
                 if resp.status == 200:
                     # Guard against HTML maintenance pages returned as 200 OK.
                     # NWS frequently returns 200 + HTML instead of JSON during

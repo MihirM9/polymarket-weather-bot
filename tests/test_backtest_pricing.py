@@ -5,17 +5,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import random
+from typing import Dict, List
 
 
 def test_tail_buckets_overpriced():
     """Tail buckets should have prices higher than true probabilities."""
-    from backtest_pricing import MispricingModel
+    from backtesting import MispricingModel
 
     model = MispricingModel()
     true_probs = [0.02, 0.05, 0.15, 0.30, 0.25, 0.13, 0.07, 0.03]
 
     random.seed(42)
-    results = {"tail_bias": [], "mode_bias": []}
+    results: Dict[str, List[float]] = {"tail_bias": [], "mode_bias": []}
     for _ in range(500):
         prices = model.generate_prices(true_probs, days_out=3)
         results["tail_bias"].append(prices[0] - true_probs[0])
@@ -29,7 +30,7 @@ def test_tail_buckets_overpriced():
     assert avg_mode_bias < 0.0, f"Mode bias {avg_mode_bias:.3f} should be negative"
 
 def test_prices_clamped():
-    from backtest_pricing import MispricingModel
+    from backtesting import MispricingModel
 
     model = MispricingModel()
     true_probs = [0.001, 0.999]
@@ -42,7 +43,7 @@ def test_prices_clamped():
 
 def test_convergence_near_resolution():
     """Prices should be more accurate (less biased) at days_out=0 vs days_out=5."""
-    from backtest_pricing import MispricingModel
+    from backtesting import MispricingModel
 
     model = MispricingModel()
     true_probs = [0.05, 0.15, 0.30, 0.30, 0.15, 0.05]
@@ -62,7 +63,7 @@ def test_convergence_near_resolution():
 
 def test_calibrate_from_markets():
     """Test that calibration updates model parameters."""
-    from backtest_pricing import MispricingModel
+    from backtesting import MispricingModel
 
     model = MispricingModel()
     closed_data = [

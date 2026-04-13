@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 def test_realistic_forecast_uses_climatology_not_actual():
     """Core anti-leakage test: realistic forecast must NOT center on actual."""
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"Miami": {196: 91.0}})
@@ -26,7 +26,7 @@ def test_realistic_forecast_uses_climatology_not_actual():
     assert abs(mean_forecast - 98.0) > 3.0, f"Mean {mean_forecast:.1f} leaked actual high"
 
 def test_optimistic_forecast_centers_on_actual():
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"Miami": {196: 91.0}})
@@ -41,7 +41,7 @@ def test_optimistic_forecast_centers_on_actual():
     assert abs(mean_forecast - 98.0) < 2.0
 
 def test_sigma_increases_with_horizon():
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"New York": {1: 38.0}})
@@ -52,7 +52,7 @@ def test_sigma_increases_with_horizon():
     assert r5.sigma > r0.sigma
 
 def test_seasonal_sigma_multiplier():
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"Miami": {105: 85.0, 196: 91.0}})
@@ -64,7 +64,7 @@ def test_seasonal_sigma_multiplier():
 
 def test_regime_inference():
     """Regime should be inferred from lagged actuals, not the target day's actual."""
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     target = date(2025, 7, 15)
     approx = HistoricalForecastApproximator()
@@ -94,7 +94,7 @@ def test_regime_inference():
     assert r.regime == "normal"
 
 def test_confidence_from_sigma():
-    from backtest_forecast import HistoricalForecastApproximator
+    from backtesting import HistoricalForecastApproximator
 
     approx = HistoricalForecastApproximator()
     approx.set_climatology({"Miami": {196: 91.0}})

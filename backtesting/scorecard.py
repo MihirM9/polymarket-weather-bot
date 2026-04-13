@@ -287,9 +287,7 @@ class BacktestScorecard:
 
         # --- Regime concentration penalty ---
         by_regime = self.breakdown_by_regime(variant)
-        total_pnl_abs = total if total != 0 else 1.0
         for regime, stats in by_regime.items():
-            regime_pnl_frac = stats["pnl"] / total_pnl_abs if total_pnl_abs != 0 else 0.0
             if stats["trades"] >= 10 and stats["pnl"] < 0:
                 score -= 15
                 penalties.append(
@@ -494,13 +492,14 @@ class BacktestScorecard:
         lines.append(f"  Calmar Ratio:   {self.calmar_ratio(variant):.2f}")
 
         # Breakdowns
-        for label, breakdown in [
+        breakdowns: list[tuple[str, Dict[Any, Dict[str, Any]]]] = [
             ("BY CITY", self.breakdown_by_city(variant)),
             ("BY HORIZON", self.breakdown_by_horizon(variant)),
             ("BY REGIME", self.breakdown_by_regime(variant)),
             ("BY SIDE", self.breakdown_by_side(variant)),
             ("BY SOURCE", self.breakdown_by_source(variant)),
-        ]:
+        ]
+        for label, breakdown in breakdowns:
             lines.append("")
             lines.append(f"  {label}")
             lines.append(f"  {'Key':<16} {'WR':>6} {'PnL':>10} {'Trades':>7} {'AvgEV':>8}")

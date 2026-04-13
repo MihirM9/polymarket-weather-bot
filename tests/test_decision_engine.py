@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date, timedelta
 
-from backtest_tracker import MockTracker
+from backtesting import MockTracker
 from forecasting import CityForecast
 from trading.decision import DecisionEngine
 from trading.markets import MarketOutcome, TemperatureMarket

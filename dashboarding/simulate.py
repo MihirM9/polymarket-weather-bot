@@ -1,10 +1,8 @@
 """
-simulate_state.py — Simulate bot state updates for dashboard testing
-=====================================================================
-Writes /tmp/bot_state.json every 3 seconds with incrementing cycle count,
-uptime, drifting prices, and occasional new trades. Ctrl+C to stop.
+dashboarding.simulate — Simulate bot state updates for dashboard testing.
 
-Usage: python3 simulate_state.py
+Usage:
+    python3 -m dashboarding.simulate
 """
 
 import json
@@ -12,6 +10,7 @@ import os
 import random
 import time
 from datetime import datetime, timezone
+from typing import Any, cast
 
 STATE_FILE = "/tmp/bot_state.json"
 
@@ -38,7 +37,7 @@ cycle = 0
 pnl = 12.35
 wins = 8
 losses = 3
-trades_log = []
+trades_log: list[dict[str, Any]] = []
 
 
 def drift_price(base, magnitude=0.015):
@@ -53,9 +52,9 @@ def build_state():
     uptime = (now - start_time).total_seconds()
 
     # Drift current prices
-    positions = []
+    positions: list[dict[str, Any]] = []
     for p in POSITIONS:
-        pos = dict(p)
+        pos = cast(dict[str, Any], dict(p))
         pos["current_price"] = drift_price(p["entry_price"])
         positions.append(pos)
 
@@ -100,15 +99,18 @@ def build_state():
     else:
         losses += 1 if random.random() < 0.3 else 0
 
-    total_exposure = sum(p["size"] for p in positions if p["status"] != "cancelled")
-    realized = sum(p["filled_usd"] for p in positions)
+    total_exposure = sum(float(p["size"]) for p in positions if p["status"] != "cancelled")
+    realized = sum(float(p["filled_usd"]) for p in positions)
     pending_exp = total_exposure - realized
     total_deployed = realized + cycle * random.uniform(2.0, 5.0)  # grows over time
 
-    city_exp = {}
+    city_exp: dict[str, float] = {}
     for p in positions:
         if p["status"] not in ("cancelled", "failed"):
-            city_exp[p["city"]] = city_exp.get(p["city"], 0) + p["size"]
+            city = str(p["city"])
+            size_value: Any = p["size"]
+            city_size = float(size_value) if isinstance(size_value, (int, float, str)) else 0.0
+            city_exp[city] = city_exp.get(city, 0.0) + city_size
 
     trade_count = wins + losses
     state = {

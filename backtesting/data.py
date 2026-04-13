@@ -22,8 +22,9 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 
 from infrastructure.http import fetch_with_retry
-from price_history import PriceHistoryFetcher
 from trading.markets import _detect_unit, _extract_date, _match_city, _parse_bucket
+
+from .price_history import PriceHistoryFetcher
 
 logger = logging.getLogger(__name__)
 

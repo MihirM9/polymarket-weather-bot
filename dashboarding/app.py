@@ -1,10 +1,8 @@
 """
-dashboard.py — Live trading dashboard server
-=============================================
-Lightweight Starlette server that reads bot_state.json and serves
-a terminal-aesthetic dashboard. Run alongside the bot on the same box.
+dashboarding.app — Live trading dashboard server.
 
-Usage: uvicorn dashboard:app --host 0.0.0.0 --port 8050
+Usage:
+    uvicorn dashboarding.app:app --host 0.0.0.0 --port 8050
 """
 
 import json
@@ -16,7 +14,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 STATE_FILE = os.getenv("BOT_STATE_FILE", "/tmp/bot_state.json")
-DASHBOARD_HTML = Path(__file__).parent / "dashboard.html"
+DASHBOARD_HTML = Path(__file__).resolve().parent.parent / "dashboard.html"
 
 
 async def index(request):
@@ -33,7 +31,9 @@ async def get_state(request):
         return JSONResponse({"error": "State file corrupted", "timestamp": None})
 
 
-app = Starlette(routes=[
-    Route("/", index),
-    Route("/api/state", get_state),
-])
+app = Starlette(
+    routes=[
+        Route("/", index),
+        Route("/api/state", get_state),
+    ]
+)

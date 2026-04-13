@@ -22,8 +22,8 @@ import json
 import logging
 import os
 import warnings
-from dataclasses import dataclass, field
-from datetime import datetime, date, timezone, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -64,6 +64,12 @@ class OpenOrder:
     filled_shares: float = 0.0        # Actual shares received
     avg_fill_price: float = 0.0       # Weighted average fill price
     last_checked: Optional[datetime] = None
+
+    # Dry-run metadata captured at execution time for downstream logging.
+    simulated_slippage: float = 0.0
+    simulated_fill_ratio: float = 1.0
+    simulated_is_maker: bool = False
+    simulated_book_depth: float = 0.0
 
     @property
     def unfilled_usd(self) -> float:
@@ -164,6 +170,10 @@ class PositionTracker:
                         "filled_size_usd": o.filled_size_usd,
                         "filled_shares": o.filled_shares,
                         "avg_fill_price": o.avg_fill_price,
+                        "simulated_slippage": o.simulated_slippage,
+                        "simulated_fill_ratio": o.simulated_fill_ratio,
+                        "simulated_is_maker": o.simulated_is_maker,
+                        "simulated_book_depth": o.simulated_book_depth,
                     }
                     for oid, o in self._orders.items()
                 },
@@ -331,6 +341,10 @@ class PositionTracker:
                         filled_size_usd=od.get("filled_size_usd", 0.0),
                         filled_shares=od.get("filled_shares", 0.0),
                         avg_fill_price=od.get("avg_fill_price", 0.0),
+                        simulated_slippage=od.get("simulated_slippage", 0.0),
+                        simulated_fill_ratio=od.get("simulated_fill_ratio", 1.0),
+                        simulated_is_maker=od.get("simulated_is_maker", False),
+                        simulated_book_depth=od.get("simulated_book_depth", 0.0),
                     )
                     self._orders[oid] = order
                 except Exception as e:
@@ -386,6 +400,32 @@ class PositionTracker:
         logger.info(f"Registered order {order.order_id}: {order.side} {order.outcome_label} "
                      f"${order.intended_size_usd:.2f} @ {order.limit_price:.3f}")
         self._save_state()
+
+    def apply_dry_run_fill_tick(self, filled_orders: List[OpenOrder]) -> int:
+        """
+        Fold completed dry-run maker fills into tracker exposure state.
+
+        The simulator mutates the tracked OpenOrder objects in place as pending
+        maker orders age into filled/partial/cancelled states. This helper keeps
+        that transition encapsulated within PositionTracker instead of having the
+        main loop reach into private fields directly.
+        """
+        self._reset_daily_if_needed()
+
+        if not filled_orders:
+            return 0
+
+        applied = 0
+        for order in filled_orders:
+            if order.order_id not in self._orders:
+                continue
+            self._daily_realized += order.filled_size_usd
+            self._log_order(order)
+            applied += 1
+
+        self._recalculate_pending()
+        self._save_state()
+        return applied
 
     def register_dry_run_fill(self, order: OpenOrder):
         """For dry-run mode: immediately mark as filled at limit price.

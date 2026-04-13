@@ -449,6 +449,13 @@ class OrderExecutor:
                 )
                 self.fill_tracker.register_pending(order_id, fallback_fill, order)
 
+            order.simulated_slippage = sim_fill.slippage if sim_fill else 0.01
+            order.simulated_fill_ratio = sim_fill.fill_ratio if sim_fill else 0.5
+            order.simulated_is_maker = sim_fill.is_maker if sim_fill else True
+            order.simulated_book_depth = (
+                sum(s for _, s in snapshot.asks) + sum(s for _, s in snapshot.bids)
+                if snapshot else 0.0
+            )
             self.tracker.register_order(order)
 
             # Build descriptive log message with fill quality info
@@ -460,13 +467,6 @@ class OrderExecutor:
                 f"${signal.position_size_usd:.2f} @ {signal.price_limit:.3f} "
                 f"| fill={fill_ratio_str} slip={slippage_str} ({maker_str}) "
                 f"| {signal.city} {signal.market_date} (id={order_id})"
-            )
-
-            # Store sim_fill on order for logging (transient attribute)
-            order._sim_fill = sim_fill  # type: ignore[attr-defined]
-            order._book_depth = (  # type: ignore[attr-defined]
-                sum(s for _, s in snapshot.asks) + sum(s for _, s in snapshot.bids)
-                if snapshot else 0.0
             )
             return order
 
@@ -531,15 +531,12 @@ class OrderExecutor:
         for signal in signals:
             order = await self.execute_signal(signal)
             if order:
-                # Extract dry-run simulation metadata if available
-                sim_fill = getattr(order, "_sim_fill", None)
-                book_depth = getattr(order, "_book_depth", 0.0)
                 trade_logger.log_trade(
                     signal, order, self.dry_run,
-                    slippage=sim_fill.slippage if sim_fill else 0.0,
-                    fill_ratio=sim_fill.fill_ratio if sim_fill else 1.0,
-                    is_maker=sim_fill.is_maker if sim_fill else False,
-                    book_depth=book_depth,
+                    slippage=order.simulated_slippage,
+                    fill_ratio=order.simulated_fill_ratio,
+                    is_maker=order.simulated_is_maker,
+                    book_depth=order.simulated_book_depth,
                 )
                 # Only send Telegram alerts for high-conviction trades (§ noise filter)
                 if signal.ev >= cfg.telegram_min_ev:

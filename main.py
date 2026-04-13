@@ -1,13 +1,14 @@
 """
-main.py — Polymarket Weather Trading Bot v3
+main.py — Polymarket Weather Trading Bot v5
 =============================================
-v3 changes:
+v5 changes:
   - PositionTracker: polls CLOB for fill status, reconciles real exposure.
   - EnsembleBlender: blends NWS + OpenWeatherMap, dynamic sigma from model spread.
   - Decision engine uses tracker.total_exposure for accurate risk caps.
+  - Resolution tracking and dashboard export are integrated into the main loop.
   - Scan cycle now: poll_fills → forecast → ensemble_blend → parse → decide → execute.
 
-Architecture (v3):
+Architecture (v5):
   ┌─────────────────┐
   │ Position Tracker │◄──── poll CLOB for fill status (start of each cycle)
   └────────┬────────┘
@@ -105,15 +106,13 @@ async def run_scan_cycle(
     else:
         # Dry-run: tick simulated maker fills forward by one cycle
         newly_filled = executor.fill_tracker.tick(cycle_count)
+        applied_fills = tracker.apply_dry_run_fill_tick(newly_filled)
         for order in newly_filled:
-            tracker._daily_realized += order.filled_size_usd
             logger.info(
                 f"[DRY-RUN] Simulated maker fill: {order.outcome_label} "
                 f"${order.filled_size_usd:.2f} @ {order.avg_fill_price:.3f}"
             )
-        tracker._recalculate_pending()
-        if newly_filled:
-            tracker._save_state()
+        if applied_fills:
             logger.info(f"Dry-run fill tick: {len(newly_filled)} order(s) filled. "
                         f"{executor.fill_tracker.get_summary()}")
     logger.info(f"Exposure state: {tracker.get_exposure_summary()}")

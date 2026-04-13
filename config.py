@@ -7,8 +7,11 @@ Ref: Research §6.2 (Recommended full-stack architecture) and §7 (Actionable ne
 
 import os
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Dict, List, Tuple
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
-from typing import Dict, Tuple, List
 
 load_dotenv()
 
@@ -103,43 +106,50 @@ class Config:
                 self.noaa_stations[city_name.strip()] = station.strip()
 
     # City timezone UTC offsets (hours). Used for determining local date
-    # and resolution timing. Negative = behind UTC.
-    # These use standard time; DST adds +1 but we use a conservative buffer anyway.
-    CITY_UTC_OFFSETS: Dict[str, int] = field(default_factory=lambda: {
-        "New York": -5,
-        "Chicago": -6,
-        "Los Angeles": -8,
-        "Miami": -5,
-        "Houston": -6,
-        "Dallas": -6,
+    # and resolution timing. IANA names keep DST handling correct.
+    CITY_TIMEZONES: Dict[str, str] = field(default_factory=lambda: {
+        "New York": "America/New_York",
+        "Chicago": "America/Chicago",
+        "Los Angeles": "America/Los_Angeles",
+        "Miami": "America/New_York",
+        "Houston": "America/Chicago",
+        "Dallas": "America/Chicago",
     })
+
+    def utc_now(self) -> datetime:
+        """Wrapper for testable current UTC time retrieval."""
+        return datetime.now(timezone.utc)
+
+    def city_zoneinfo(self, city: str) -> ZoneInfo:
+        """Return the city's timezone, defaulting to New York for unknown cities."""
+        tz_name = self.CITY_TIMEZONES.get(city, "America/New_York")
+        return ZoneInfo(tz_name)
 
     @property
     def is_live(self) -> bool:
         return self.mode.lower() == "live"
 
-    def city_local_date(self, city: str) -> "date":
-        """Get the current local date for a city (accounts for UTC offset)."""
-        from datetime import datetime, timezone, timedelta
-        offset_hours = self.CITY_UTC_OFFSETS.get(city, -5)  # default EST
-        local_now = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
-        return local_now.date()
+    def city_local_now(self, city: str) -> datetime:
+        """Get the current local time for a city using timezone-aware conversion."""
+        return self.utc_now().astimezone(self.city_zoneinfo(city))
 
-    def is_market_day_complete(self, city: str, market_date: "date") -> bool:
+    def city_local_date(self, city: str) -> date:
+        """Get the current local date for a city with DST-aware timezone conversion."""
+        return self.city_local_now(city).date()
+
+    def is_market_day_complete(self, city: str, market_date: date) -> bool:
         """
         Check if a market date is fully complete for a city.
         Returns True only if it's past 6 AM local time the NEXT day,
         ensuring all observations for the market date are in.
         """
-        from datetime import datetime, timezone, timedelta
-        offset_hours = self.CITY_UTC_OFFSETS.get(city, -5)
-        local_now = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
-        # Market day is complete after 6 AM local the next day
-        next_day_6am = datetime(
-            market_date.year, market_date.month, market_date.day,
-            6, 0, tzinfo=timezone.utc
-        ) + timedelta(days=1) - timedelta(hours=offset_hours)
-        return datetime.now(timezone.utc) >= next_day_6am
+        local_now = self.city_local_now(city)
+        next_day_6am = datetime.combine(
+            market_date + timedelta(days=1),
+            time(hour=6, minute=0),
+            tzinfo=self.city_zoneinfo(city),
+        )
+        return local_now >= next_day_6am
 
 
 # Singleton

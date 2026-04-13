@@ -41,21 +41,16 @@ import signal
 import sys
 from dataclasses import dataclass
 from datetime import datetime, date as date_type, timezone
-from pathlib import Path
 from typing import Optional
-
-import aiohttp
 
 from background_io import default_io_manager
 from config import cfg
-from forecast_scanner import ForecastScanner, CityForecast, compute_confidence
+from forecasting import ForecastScanner, EnsembleBlender, MetarFetcher, ForecastingService
 from health_monitor import HealthMonitor
 from polymarket_parser import PolymarketParser
 from decision_engine import DecisionEngine
-from ensemble_blender import EnsembleBlender
 from position_tracker import PositionTracker, OrderStatus
 from execution import OrderExecutor, TelegramAlerter, TradeLogger, PerformanceTracker
-from metar_fetcher import MetarFetcher
 from resolution_tracker import ResolutionTracker
 from runtime_logging import configure_logging
 
@@ -101,97 +96,6 @@ def _tick_order_state(executor: OrderExecutor, tracker: PositionTracker, cycle_c
         logger.info(
             f"Dry-run fill tick: {len(newly_filled)} order(s) filled. "
             f"{executor.fill_tracker.get_summary()}"
-        )
-
-
-async def _collect_station_observations(
-    scanner: ForecastScanner,
-    forecasts: list[CityForecast],
-) -> dict[str, float]:
-    """Fetch same-day station observations keyed by city."""
-    same_day_cities = {
-        fc.city for fc in forecasts
-        if fc.forecast_date == cfg.city_local_date(fc.city)
-    }
-    observations: dict[str, float] = {}
-    if not same_day_cities:
-        return observations
-
-    async with aiohttp.ClientSession() as session:
-        for city in same_day_cities:
-            station_id = cfg.noaa_stations.get(city)
-            if not station_id:
-                continue
-            temp_f = await scanner.fetch_station_observation(session, station_id)
-            if temp_f is not None:
-                observations[city] = temp_f
-    return observations
-
-
-def _apply_same_day_observation_adjustments(
-    forecast: CityForecast,
-    metar_observations: dict,
-    station_observations: dict[str, float],
-) -> None:
-    if forecast.forecast_date != cfg.city_local_date(forecast.city):
-        return
-
-    current_temps = []
-    metar_obs = metar_observations.get(forecast.city)
-    if metar_obs:
-        current_temps.append(metar_obs.temp_f)
-    station_temp = station_observations.get(forecast.city)
-    if station_temp is not None:
-        current_temps.append(station_temp)
-
-    if not current_temps:
-        return
-
-    max_observed = max(current_temps)
-    if max_observed > forecast.high_f:
-        logger.info(
-            f"Observed temp {max_observed:.0f}°F > forecast "
-            f"{forecast.high_f:.0f}°F for {forecast.city} — raising floor"
-        )
-        forecast.high_f = max_observed
-        forecast.sigma = max(forecast.sigma, 1.5)
-
-    divergence = abs(forecast.high_f - max_observed)
-    if divergence > 10:
-        sigma_boost = 1.0 + (divergence - 10) * 0.05
-        forecast.sigma *= sigma_boost
-        logger.info(
-            f"Large obs/forecast divergence ({divergence:.0f}°F) "
-            f"for {forecast.city} — σ boosted to {forecast.sigma:.1f}"
-        )
-
-
-async def _blend_forecasts(
-    scanner: ForecastScanner,
-    blender: EnsembleBlender,
-    metar_fetcher: MetarFetcher,
-    forecasts: list[CityForecast],
-) -> None:
-    logger.info("Step 2/5: Blending with ensemble forecasts...")
-    cities_dates = [(fc.city, fc.forecast_date) for fc in forecasts]
-    owm_forecasts = await blender.fetch_all_supplemental(cities_dates)
-    metar_observations = await metar_fetcher.fetch_all()
-    station_observations = await _collect_station_observations(scanner, forecasts)
-
-    for forecast in forecasts:
-        key = f"{forecast.city}_{forecast.forecast_date.isoformat()}"
-        owm_point = owm_forecasts.get(key)
-        supplemental = [owm_point] if owm_point else []
-        _apply_same_day_observation_adjustments(
-            forecast,
-            metar_observations,
-            station_observations,
-        )
-        ensemble = blender.blend(forecast.high_f, forecast.sigma, supplemental)
-        forecast.high_f = ensemble.blended_high
-        forecast.sigma = ensemble.ensemble_sigma
-        forecast.confidence = compute_confidence(
-            forecast.sigma, forecast.is_stable, forecast.regime_multiplier
         )
 
 
@@ -308,14 +212,13 @@ def export_dashboard_state(
 
 async def run_scan_cycle(
     scanner: ForecastScanner,
-    blender: EnsembleBlender,
+    forecasting_service: ForecastingService,
     parser: PolymarketParser,
     engine: DecisionEngine,
     executor: OrderExecutor,
     tracker: PositionTracker,
     telegram: TelegramAlerter,
     trade_logger: TradeLogger,
-    metar_fetcher: MetarFetcher,
     resolution_tracker: ResolutionTracker,
     cycle_count: int = 0,
 ) -> ScanCycleResult:
@@ -344,7 +247,8 @@ async def run_scan_cycle(
         return ScanCycleResult(executed=0)
 
     # Step 3: Fetch supplemental forecasts and blend (v3 Fix #2)
-    await _blend_forecasts(scanner, blender, metar_fetcher, forecasts)
+    logger.info("Step 2/5: Blending with ensemble forecasts...")
+    await forecasting_service.enrich_forecasts(forecasts)
 
     # Step 4: Discover & parse markets
     logger.info("Step 3/5: Discovering temperature markets...")
@@ -421,6 +325,8 @@ async def main():
     # Initialize all components
     scanner = ForecastScanner()
     blender = EnsembleBlender()
+    metar_fetcher = MetarFetcher()
+    forecasting_service = ForecastingService(scanner, blender, metar_fetcher)
     parser = PolymarketParser()
     engine = DecisionEngine()
     tracker = PositionTracker()
@@ -428,7 +334,6 @@ async def main():
     telegram = TelegramAlerter()
     trade_logger = TradeLogger()
     perf_tracker = PerformanceTracker()
-    metar_fetcher = MetarFetcher()
     resolution_tracker = ResolutionTracker()
     health_monitor = HealthMonitor()
 
@@ -452,8 +357,8 @@ async def main():
         try:
             cycle_count += 1
             cycle_result = await run_scan_cycle(
-                scanner, blender, parser, engine, executor,
-                tracker, telegram, trade_logger, metar_fetcher,
+                scanner, forecasting_service, parser, engine, executor,
+                tracker, telegram, trade_logger,
                 resolution_tracker,
                 cycle_count=cycle_count,
             )

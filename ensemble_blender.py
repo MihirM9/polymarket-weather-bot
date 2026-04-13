@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 
 from api_utils import fetch_with_retry
-from config import cfg
+from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,8 @@ class EnsembleBlender:
       - If only NWS available → falls back to NWS sigma (no degradation).
     """
 
-    def __init__(self):
+    def __init__(self, config: Config = cfg):
+        self.config = config
         self.enabled = bool(OWM_API_KEY)
         if not self.enabled:
             logger.info("Ensemble blending disabled (no OPENWEATHER_API_KEY). "
@@ -143,7 +144,7 @@ class EnsembleBlender:
         if not self.enabled:
             return None
 
-        coords = cfg.nws_points.get(city)
+        coords = self.config.nws_points.get(city)
         if not coords:
             return None
 

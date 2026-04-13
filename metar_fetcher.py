@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from config import cfg
+from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,9 @@ class MetarFetcher:
     actual observations are more reliable than model predictions.
     """
 
-    def __init__(self):
-        self._stations: Dict[str, str] = cfg.noaa_stations  # city → station_id
+    def __init__(self, config: Config = cfg):
+        self.config = config
+        self._stations: Dict[str, str] = config.noaa_stations  # city → station_id
 
     async def fetch_observation(
         self, session: aiohttp.ClientSession, city: str

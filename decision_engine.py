@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from config import cfg
+from config import cfg, Config
 from forecast_scanner import CityForecast, bucket_probabilities
 from polymarket_parser import TemperatureMarket, MarketOutcome
 
@@ -33,10 +33,6 @@ CORRELATION_GROUPS = {
     "west": ["Los Angeles"],
 }
 CORRELATED_GROUP_CAP_MULT = 1.5
-
-# Polymarket fee rate (approximate combined maker/taker) — loaded from config
-FEE_RATE = cfg.fee_rate
-
 
 @dataclass
 class TradeSignal:
@@ -57,7 +53,7 @@ class TradeSignal:
     rationale: str
 
 
-def _ev_yes(p_true: float, price: float, fee: float = FEE_RATE) -> float:
+def _ev_yes(p_true: float, price: float, fee: float) -> float:
     """
     EV of buying Yes at `price`.
     Payoff: win → (1 - price) * (1 - fee);  lose → -price.
@@ -66,7 +62,7 @@ def _ev_yes(p_true: float, price: float, fee: float = FEE_RATE) -> float:
     return p_true * (1.0 - price) * (1.0 - fee) - (1.0 - p_true) * price
 
 
-def _ev_no(p_true: float, price_yes: float, fee: float = FEE_RATE) -> float:
+def _ev_no(p_true: float, price_yes: float, fee: float) -> float:
     """
     EV of buying No at price_no = 1 - price_yes.
     Ref: §5.2 — EV_No = (1-p_true)*(1-c) - p_true*(1+c) adjusted for pricing.
@@ -121,7 +117,8 @@ class DecisionEngine:
         the model is uncertain" situations that cause variance blowups.
     """
 
-    def __init__(self):
+    def __init__(self, config: Config = cfg):
+        self.config = config
         self.daily_pnl: float = 0.0         # tracked across the day
         self.daily_exposure: float = 0.0     # total $ at risk today
         self._today: Optional[date] = None
@@ -143,13 +140,14 @@ class DecisionEngine:
     def is_shutdown(self) -> bool:
         """Check daily loss cap (§5.4: -$50 shutdown for $500 bankroll)."""
         self._reset_daily_if_needed()
-        if self.daily_pnl < -cfg.daily_loss_cap:
-            logger.warning(f"DAILY LOSS CAP BREACHED: PnL={self.daily_pnl:.2f}, cap=-{cfg.daily_loss_cap}")
+        if self.daily_pnl < -self.config.daily_loss_cap:
+            logger.warning(
+                f"DAILY LOSS CAP BREACHED: PnL={self.daily_pnl:.2f}, cap=-{self.config.daily_loss_cap}"
+            )
             return True
         return False
 
-    @staticmethod
-    def _adaptive_kelly_fraction(base_fraction: float, confidence: float) -> float:
+    def _adaptive_kelly_fraction(self, base_fraction: float, confidence: float) -> float:
         """
         Scale Kelly fraction by forecast confidence.
 
@@ -163,7 +161,7 @@ class DecisionEngine:
         while low-confidence ones are damped to 0.25x.
         """
         scaling = 0.25 + 1.25 * confidence  # range: [0.25, 1.50]
-        scaling = min(scaling, cfg.max_kelly_mult)
+        scaling = min(scaling, self.config.max_kelly_mult)
         return base_fraction * scaling
 
     @staticmethod
@@ -200,7 +198,7 @@ class DecisionEngine:
 
     def _check_group_exposure(self, city: str, proposed_size: float) -> float:
         """Cap proposed_size so no correlation group exceeds its cap."""
-        group_cap = cfg.per_market_max_pct * cfg.bankroll * CORRELATED_GROUP_CAP_MULT
+        group_cap = self.config.per_market_max_pct * self.config.bankroll * CORRELATED_GROUP_CAP_MULT
         for group in self._get_city_groups(city):
             current = self._group_exposure.get(group, 0.0)
             remaining = max(0.0, group_cap - current)
@@ -248,11 +246,11 @@ class DecisionEngine:
             probs = bucket_probabilities(fc.high_f, fc.sigma, buckets)
 
             # Compute adaptive parameters for this forecast
-            adaptive_kelly = self._adaptive_kelly_fraction(cfg.kelly_fraction, fc.confidence)
-            dynamic_edge = self._dynamic_edge_threshold(cfg.min_edge, fc.confidence, fc.sigma)
+            adaptive_kelly = self._adaptive_kelly_fraction(self.config.kelly_fraction, fc.confidence)
+            dynamic_edge = self._dynamic_edge_threshold(self.config.min_edge, fc.confidence, fc.sigma)
 
             days_to_res = max(1, (mkt.market_date - date.today()).days)
-            time_adj_ev_threshold = self._time_decay_ev_threshold(cfg.min_ev_threshold, days_to_res)
+            time_adj_ev_threshold = self._time_decay_ev_threshold(self.config.min_ev_threshold, days_to_res)
 
             for i, outcome in enumerate(mkt.outcomes):
                 p_true = probs.get(i, 0.0)
@@ -272,7 +270,7 @@ class DecisionEngine:
                     continue
 
                 # --- Evaluate BUY YES side ---
-                ev_y = _ev_yes(p_true, price_yes, fee=cfg.maker_fee_rate)
+                ev_y = _ev_yes(p_true, price_yes, fee=self.config.maker_fee_rate)
                 edge_y = p_true - price_yes
                 kelly_y = _kelly_yes(p_true, price_yes) * adaptive_kelly
 
@@ -304,7 +302,7 @@ class DecisionEngine:
 
                 # --- Evaluate BUY NO side (sell Yes / buy No) ---
                 # This is the "sell extremes" play (§2.3: selling extremes No at 0.93-0.99)
-                ev_n = _ev_no(p_true, price_yes, fee=cfg.maker_fee_rate)
+                ev_n = _ev_no(p_true, price_yes, fee=self.config.maker_fee_rate)
                 edge_n = (1.0 - p_true) - (1.0 - price_yes)  # = price_yes - p_true
                 kelly_n = _kelly_no(p_true, price_yes) * adaptive_kelly
 
@@ -356,14 +354,14 @@ class DecisionEngine:
         falling back to self.daily_exposure for backward compat / dry-run.
         v4: Correlated exposure group caps.
         """
-        raw_size = kelly_frac * cfg.bankroll
+        raw_size = kelly_frac * self.config.bankroll
 
         # Per-market cap
-        market_cap = cfg.per_market_max_pct * cfg.bankroll
+        market_cap = self.config.per_market_max_pct * self.config.bankroll
         raw_size = min(raw_size, market_cap)
 
         # Absolute cap
-        raw_size = min(raw_size, cfg.max_position_usd)
+        raw_size = min(raw_size, self.config.max_position_usd)
 
         # Check daily exposure — use tracker if available (ground truth),
         # otherwise fall back to internal counter
@@ -372,7 +370,7 @@ class DecisionEngine:
         else:
             current_exposure = self.daily_exposure
 
-        remaining_budget = cfg.bankroll * 0.3 - current_exposure
+        remaining_budget = self.config.bankroll * 0.3 - current_exposure
         raw_size = min(raw_size, max(0.0, remaining_budget))
 
         # Correlated exposure group cap (v4)

@@ -1,4 +1,4 @@
-# Polymarket Weather Trading Bot v4
+# Polymarket Weather Trading Bot v5
 
 Autonomous Python trading bot for Polymarket US city daily high-temperature bucket markets. Trades on Polygon (chain_id=137) via py-clob-client. Exploits systematic mispricing between NOAA/NWS forecast accuracy (~90% at 5-day, 1-2F short-term) and retail market pricing.
 
@@ -14,7 +14,7 @@ The bot:
 5. **Trades when it finds mispricing** -- if the bot thinks a bucket has a 25% chance but the market prices it at 7%, that's an edge
 6. **Manages risk** with 13 layers of controls (Kelly sizing, exposure caps, loss limits, etc.)
 
-The main loop runs every 2 minutes: poll fills -> forecast -> blend -> parse markets -> decide -> execute.
+The live loop currently runs every 2 minutes: poll fills -> forecast -> blend -> parse markets -> decide -> execute. That cadence is configurable and should be treated as an operational default, not a permanent truth.
 
 ## Architecture
 
@@ -35,13 +35,13 @@ Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
                     (CLOB / Telegram / CSV)
 ```
 
-## Modules
+## Runtime Modules
 
 | File | Purpose |
 |------|---------|
 | `main.py` | Async main loop, scan orchestration, graceful shutdown |
 | `config.py` | Loads .env, typed Config singleton |
-| `api_utils.py` | Shared HTTP retry/backoff for all external API calls |
+| `forecasting/` | Forecast subsystem entrypoint and orchestration package |
 | `forecast_scanner.py` | NWS API -> Gaussian bucket probabilities, negation-aware regime detection, seasonal sigma, station observations |
 | `ensemble_blender.py` | NWS + OWM + METAR + Station blending, dynamic sigma, city-specific peak hours, cache pruning |
 | `metar_fetcher.py` | METAR aviation weather real-time observations (aviationweather.gov), temp parsing |
@@ -50,6 +50,20 @@ Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
 | `position_tracker.py` | CLOB fill polling, exposure tracking, stale cancel cooldown, adverse selection detection |
 | `execution.py` | ClobClient orders, maker/taker pricing, orderbook depth, Sharpe tracking, CSV/Telegram |
 | `dry_run_simulator.py` | Realistic paper trading -- fetches live orderbooks, simulates partial fills and slippage |
+
+## Infrastructure
+
+| File | Purpose |
+|------|---------|
+| `api_utils.py` | Shared HTTP retry/backoff for external API calls |
+| `api_models.py` | Response validation models for external APIs |
+| `background_io.py` | Background persistence so disk writes do not block the event loop |
+| `runtime_logging.py` | Queue-backed logging setup |
+| `health_monitor.py` | Runtime health checks and fail-safe shutdown rules |
+
+## Research & Backtesting
+
+The repo still contains several `backtest_*` modules. That is intentional for now, but the target state is a single `backtesting/` package once the live path settles enough to justify a more aggressive collapse.
 
 ## Key Math
 
@@ -85,7 +99,22 @@ Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install aiohttp python-dotenv
+pip install -r requirements.txt
+```
+
+Optional developer tooling:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+If you prefer `uv`:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install -r requirements-dev.txt
 ```
 
 ### 2. Configure
@@ -145,7 +174,7 @@ For uninterrupted trading, deploy on a VPS (DigitalOcean, Oracle Cloud free tier
 cd ~/polymarket-weather-bot
 python3 -m venv venv
 source venv/bin/activate
-pip install aiohttp python-dotenv
+pip install -r requirements.txt
 
 # Create .env with your config
 cp .env.example .env
@@ -204,6 +233,13 @@ The bot's edge comes from **knowing the weather better than the market**:
 - **v3.1**: 8 robustness fixes -- cancel-replace cooldown, negation-aware regime detection, API retry/backoff, parse metrics, city-specific peak hours, OWM cache pruning, configurable fees, orderbook depth check
 - **v4**: 9 optimizations -- station-specific NOAA modeling, METAR aviation weather as 3rd ensemble source, seasonal sigma adjustment, time-decay capital allocation, correlated exposure caps, maker/taker fee optimization, adverse selection detection, Sharpe ratio tracking, capped adaptive Kelly
 - **v4.1**: Realistic dry-run simulator -- live orderbook matching, partial fills, slippage tracking, fill rate metrics
+- **v5**: Runtime hardening -- response validation, background persistence, queue-backed logging, health-monitor fail-safes, stronger live-path tests
+
+## Developer Notes
+
+- See [ARCHITECTURE.md](./ARCHITECTURE.md) for the current and target module layout.
+- `requirements.txt` is the runtime install surface.
+- `requirements-dev.txt` is for testing, linting, property-based testing, and recorded-response integration work.
 
 ## License
 

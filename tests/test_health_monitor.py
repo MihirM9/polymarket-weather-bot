@@ -40,3 +40,15 @@ def test_health_monitor_triggers_fail_safe_on_repeated_dashboard_export_failure(
     reason = monitor.fail_safe_reason()
     assert reason is not None
     assert "Dashboard state export failed" in reason
+
+
+def test_health_monitor_cycle_success_clears_failure_state():
+    monitor = HealthMonitor()
+
+    monitor.record_cycle_failure("temporary API issue")
+    monitor.record_cycle_failure("temporary API issue")
+    monitor.record_cycle_success()
+    monitor.record_cycle_failure("fresh issue")
+
+    assert monitor.fail_safe_reason() is None
+    assert monitor.state.consecutive_cycle_failures == 1

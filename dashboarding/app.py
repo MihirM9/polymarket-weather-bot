@@ -14,7 +14,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 STATE_FILE = os.getenv("BOT_STATE_FILE", "/tmp/bot_state.json")
-DASHBOARD_HTML = Path(__file__).resolve().parent.parent / "dashboard.html"
+DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard.html"
 
 
 async def index(request):

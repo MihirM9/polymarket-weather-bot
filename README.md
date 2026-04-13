@@ -230,6 +230,23 @@ The bot's edge comes from **knowing the weather better than the market**:
 4. **When the market prices an extreme bucket at 15% but the bot calculates 0%**, it sells (buys NO)
 5. **Only one bucket wins per city per day** -- the SELL/NO bets on unlikely buckets win most often (10 out of 11 buckets lose each day)
 
+## Performance Evidence
+
+This repo currently demonstrates:
+
+- a fully typed and linted live trading path
+- a passing automated test suite for runtime and backtesting logic
+- dry-run execution against live orderbook data
+- historical replay tooling under `backtesting/`
+
+This repo does **not** currently publish audited live P&L, a forward-test equity curve, or a canonical backtest scorecard in the README. That is intentional: credibility should come from reproducible artifacts, not hand-wavy headline numbers.
+
+If you want stronger public evidence before allocating more capital, the next high-value additions are:
+
+- a saved dry-run performance summary with win rate, drawdown, Sharpe, and trade count
+- a reproducible backtest report generated from `backtesting/`
+- a small forward-test section summarizing paper-trading results over a fixed date range
+
 ## Version History
 
 - **v1**: Basic Gaussian model, flat Kelly (0.15x), flat edge threshold (8 cents), fire-and-forget orders

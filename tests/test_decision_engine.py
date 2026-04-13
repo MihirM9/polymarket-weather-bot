@@ -92,3 +92,49 @@ def test_decision_engine_shuts_down_after_daily_loss_cap_breach():
     engine.update_pnl(-(engine.config.daily_loss_cap + 0.01))
 
     assert engine.is_shutdown() is True
+
+
+def test_decision_engine_skips_unstable_forecast():
+    engine = DecisionEngine()
+    tracker = MockTracker(bankroll=500.0)
+    market_date = date.today() + timedelta(days=1)
+    market = TemperatureMarket(
+        market_id="mkt1",
+        question="What will the highest temperature be in Miami on tomorrow?",
+        city="Miami",
+        market_date=market_date,
+        resolution_source="NWS",
+        outcomes=[
+            MarketOutcome(
+                outcome_label="89-90°F",
+                token_id="tok1",
+                price_yes=0.20,
+                price_no=0.80,
+                bucket_low=89.0,
+                bucket_high=91.0,
+            )
+        ],
+    )
+    forecast = CityForecast(
+        city="Miami",
+        forecast_date=market_date,
+        high_f=90.0,
+        sigma=1.2,
+        is_stable=False,
+        confidence=0.95,
+        weather_regime="frontal",
+        regime_multiplier=1.2,
+    )
+
+    signals = engine.evaluate([(market, forecast)], tracker=tracker)
+
+    assert signals == []
+
+
+def test_decision_engine_respects_remaining_exposure_budget():
+    engine = DecisionEngine()
+    tracker = type("Tracker", (), {"total_exposure": 149.5})()
+
+    size = engine._size_position(0.5, tracker=tracker, city="Miami")
+
+    assert size == 0.0

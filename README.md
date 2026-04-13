@@ -18,21 +18,39 @@ The live loop currently runs every 2 minutes: poll fills -> forecast -> blend ->
 
 ## Architecture
 
-```
-Position Tracker <-- poll CLOB for fill status (start of each cycle)
-       |
-Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
-(NWS/NOAA)           (NWS + OWM +     <-- METAR Fetcher (aviation weather)
-                      METAR + Station)  <-- NOAA Station Obs (resolution source)
-                           |
-                    Polymarket Parser
-                    (Gamma API)
-                           |
-                    Decision Engine <-- tracker.total_exposure
-                    (EV / Kelly / Risk)
-                           |
-                    Execution --> PositionTracker.register()
-                    (CLOB / Telegram / CSV)
+```text
+main.py
+  -> forecasting/
+     -> scanner.py
+     -> blender.py
+     -> metar.py
+     -> service.py
+  -> trading/
+     -> markets.py
+     -> decision.py
+     -> execution.py
+     -> positions.py
+     -> resolution.py
+     -> dry_run.py
+  -> infrastructure/
+     -> http.py
+     -> models.py
+     -> io.py
+     -> logging.py
+     -> health.py
+  -> backtesting/
+     -> data.py
+     -> forecast.py
+     -> pricing.py
+     -> replay.py
+     -> scorecard.py
+     -> tracker.py
+     -> price_history.py
+  -> dashboarding/
+     -> app.py
+     -> simulate.py
+  -> tools/
+     -> analyze_trades.py
 ```
 
 ## Runtime Modules
@@ -41,29 +59,16 @@ Forecast Scanner --> Ensemble Blender --> OWM API (supplemental)
 |------|---------|
 | `main.py` | Async main loop, scan orchestration, graceful shutdown |
 | `config.py` | Loads .env, typed Config singleton |
-| `forecasting/` | Forecast subsystem entrypoint and orchestration package |
-| `forecast_scanner.py` | NWS API -> Gaussian bucket probabilities, negation-aware regime detection, seasonal sigma, station observations |
-| `ensemble_blender.py` | NWS + OWM + METAR + Station blending, dynamic sigma, city-specific peak hours, cache pruning |
-| `metar_fetcher.py` | METAR aviation weather real-time observations (aviationweather.gov), temp parsing |
-| `polymarket_parser.py` | Gamma API market discovery, bucket parsing (regex) with parse metrics, city/date matching |
-| `decision_engine.py` | EV calc, capped Kelly, time-decay sizing, correlated exposure caps, maker fee EV, seasonal sigma |
-| `position_tracker.py` | CLOB fill polling, exposure tracking, stale cancel cooldown, adverse selection detection |
-| `execution.py` | ClobClient orders, maker/taker pricing, orderbook depth, Sharpe tracking, CSV/Telegram |
-| `dry_run_simulator.py` | Realistic paper trading -- fetches live orderbooks, simulates partial fills and slippage |
-
-## Infrastructure
-
-| File | Purpose |
-|------|---------|
-| `api_utils.py` | Shared HTTP retry/backoff for external API calls |
-| `api_models.py` | Response validation models for external APIs |
-| `background_io.py` | Background persistence so disk writes do not block the event loop |
-| `runtime_logging.py` | Queue-backed logging setup |
-| `health_monitor.py` | Runtime health checks and fail-safe shutdown rules |
+| `forecasting/` | Forecast ingestion, blending, METAR/station observations, orchestration |
+| `trading/` | Market parsing, EV/Kelly decisioning, execution, fill tracking, dry-run simulation, resolution |
+| `infrastructure/` | HTTP retry, validation models, background I/O, queue-backed logging, runtime health |
+| `backtesting/` | Historical data loading, replay engine, synthetic pricing, scorecards, price history |
+| `dashboarding/` | Dashboard ASGI app plus local state simulator |
+| `tools/` | Operational helper scripts such as post-trade analysis |
 
 ## Research & Backtesting
 
-The repo still contains several `backtest_*` modules. That is intentional for now, but the target state is a single `backtesting/` package once the live path settles enough to justify a more aggressive collapse.
+Research and replay tooling now lives in a single `backtesting/` package instead of separate root-level `backtest_*` wrappers.
 
 ## Key Math
 
@@ -234,12 +239,14 @@ The bot's edge comes from **knowing the weather better than the market**:
 - **v4**: 9 optimizations -- station-specific NOAA modeling, METAR aviation weather as 3rd ensemble source, seasonal sigma adjustment, time-decay capital allocation, correlated exposure caps, maker/taker fee optimization, adverse selection detection, Sharpe ratio tracking, capped adaptive Kelly
 - **v4.1**: Realistic dry-run simulator -- live orderbook matching, partial fills, slippage tracking, fill rate metrics
 - **v5**: Runtime hardening -- response validation, background persistence, queue-backed logging, health-monitor fail-safes, stronger live-path tests
+- **v5.1**: Final package cleanup -- runtime consolidated into packages, backtest wrappers deleted, dashboard/tooling moved out of root, full-tree lint/type/test checks green
 
 ## Developer Notes
 
 - See [ARCHITECTURE.md](./ARCHITECTURE.md) for the current and target module layout.
 - `requirements.txt` is the runtime install surface.
 - `requirements-dev.txt` is for testing, linting, property-based testing, and recorded-response integration work.
+- Optional: install `pre-commit` and run `pre-commit install` to enforce `ruff`, `mypy`, and `pytest` before commits.
 
 ## License
 

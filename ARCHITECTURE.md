@@ -1,6 +1,6 @@
 # Architecture
 
-This repo has grown into three practical layers:
+This repo is now organized into four practical layers:
 
 1. **Trading runtime**
    Forecast ingestion, market parsing, decisioning, execution, position state, health checks.
@@ -8,65 +8,77 @@ This repo has grown into three practical layers:
    Historical data loading, synthetic pricing, replay, scorecards.
 3. **Operational tooling**
    Dashboard, logging, alerts, deployment helpers.
+4. **Configuration**
+   Thin root entrypoints and typed config shared across the runtime.
 
 ## Current Runtime Shape
 
 ```text
 main.py
   -> forecasting/
-     -> forecast_scanner.py
-     -> ensemble_blender.py
-     -> metar_fetcher.py
-  -> polymarket_parser.py
-  -> decision_engine.py
-  -> execution.py
-  -> position_tracker.py
-  -> resolution_tracker.py
-  -> infrastructure helpers
-     -> background_io.py
-     -> runtime_logging.py
-     -> health_monitor.py
-     -> api_utils.py
-     -> api_models.py
+     -> scanner.py
+     -> blender.py
+     -> metar.py
+     -> service.py
+  -> trading/
+     -> markets.py
+     -> decision.py
+     -> execution.py
+     -> positions.py
+     -> resolution.py
+     -> dry_run.py
+  -> infrastructure/
+     -> http.py
+     -> models.py
+     -> io.py
+     -> logging.py
+     -> health.py
 ```
 
 ## Current Research Shape
 
 ```text
-backtester.py
-  -> backtest_data.py
-  -> backtest_forecast.py
-  -> backtest_pricing.py
-  -> backtest_scorecard.py
-  -> backtest_tracker.py
+backtesting/
+  -> data.py
+  -> forecast.py
+  -> pricing.py
+  -> replay.py
+  -> scorecard.py
+  -> tracker.py
   -> price_history.py
 ```
 
-## Target Shape
-
-The long-term goal is a smaller, more boring repo:
+## Tooling Shape
 
 ```text
-app/
-  main.py
-  config.py
-  forecasting/
-  markets/
-  decision/
-  execution/
-  state/
-  infrastructure/
+dashboarding/
+  -> app.py
+  -> simulate.py
 
-backtesting/
-  loader.py
-  replay.py
-  pricing.py
-  scorecard.py
+tools/
+  -> analyze_trades.py
 ```
 
-Principles for getting there:
+## Root Shape
+
+The root is intentionally thin:
+
+```text
+main.py
+config.py
+amm_config.py
+dashboard.html
+README.md
+ARCHITECTURE.md
+```
+
+## Principles
+
+Principles that matter going forward:
 
 - keep the **live trading path** obvious and easy to test
 - keep **plumbing** in one place instead of many top-level files
 - consolidate research code into a **single backtesting package**
+- keep operational helpers out of the runtime path
 - prefer deleting indirection over preserving one-file-per-idea sprawl
+- enforce quality checks automatically so the repo does not regress

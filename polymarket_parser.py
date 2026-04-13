@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from api_models import GammaMarketWire, validate_model
 from api_utils import fetch_with_retry
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,20 @@ class PolymarketParser:
         self._parse_stats: Dict[str, int] = {"total": 0, "success": 0, "failed": 0}
         self._failed_labels: List[str] = []  # track unique failed labels for debugging
 
+    @property
+    def parse_failure_rate(self) -> float:
+        total = self._parse_stats["total"]
+        if total == 0:
+            return 0.0
+        return self._parse_stats["failed"] / total
+
+    @staticmethod
+    def _validate_market_item(item: dict, label: str) -> Optional[GammaMarketWire]:
+        parsed = validate_model(item, GammaMarketWire, label=label)
+        if parsed is None:
+            return None
+        return parsed
+
     async def fetch_temperature_markets(self) -> List[TemperatureMarket]:
         """
         Query Gamma API for active temperature markets.
@@ -211,10 +226,13 @@ class PolymarketParser:
                 )
                 if data:
                     for item in data:
-                        q = (item.get("question") or "").lower()
+                        parsed_item = self._validate_market_item(item, f"Gamma-{sort_order}")
+                        if parsed_item is None:
+                            continue
+                        q = parsed_item.question.lower()
                         if "highest" in q and "temperature" in q:
-                            mid = str(item.get("id", item.get("conditionId", "")))
-                            raw_markets[mid] = item
+                            mid = str(parsed_item.id or parsed_item.conditionId or "")
+                            raw_markets[mid] = parsed_item
 
             # Method 2: Paginated scan (broader but unreliable for temperature)
             offset = 0
@@ -232,10 +250,13 @@ class PolymarketParser:
                     break
 
                 for item in data:
-                    q = (item.get("question") or "").lower()
+                    parsed_item = self._validate_market_item(item, "Gamma-paginated")
+                    if parsed_item is None:
+                        continue
+                    q = parsed_item.question.lower()
                     if "highest" in q and "temperature" in q:
-                        mid = str(item.get("id", item.get("conditionId", "")))
-                        raw_markets[mid] = item
+                        mid = str(parsed_item.id or parsed_item.conditionId or "")
+                        raw_markets[mid] = parsed_item
 
                 if len(data) < limit:
                     break
@@ -251,11 +272,11 @@ class PolymarketParser:
             discovered_neg_ids = set()
             seed_ids: List[int] = []
             for mid, item in raw_markets.items():
-                neg_id = item.get("negRiskMarketID")
+                neg_id = item.negRiskMarketID
                 if neg_id:
                     discovered_neg_ids.add(neg_id)
                 try:
-                    seed_ids.append(int(item.get("id", 0)))
+                    seed_ids.append(int(item.id or 0))
                 except (ValueError, TypeError):
                     pass
 
@@ -293,11 +314,14 @@ class PolymarketParser:
                     results = await asyncio.gather(*batch, return_exceptions=True)
                     for result in results:
                         if isinstance(result, dict):
-                            q = (result.get("question") or "").lower()
+                            parsed_result = self._validate_market_item(result, "Gamma-sibling")
+                            if parsed_result is None:
+                                continue
+                            q = parsed_result.question.lower()
                             if "highest" in q and "temperature" in q:
-                                mid = str(result.get("id", result.get("conditionId", "")))
+                                mid = str(parsed_result.id or parsed_result.conditionId or "")
                                 if mid not in raw_markets:
-                                    raw_markets[mid] = result
+                                    raw_markets[mid] = parsed_result
 
         logger.info(f"Discovered {len(raw_markets)} individual temperature markets")
 
@@ -307,11 +331,11 @@ class PolymarketParser:
 
         # Group binary markets by negRiskMarketID to reconstruct ladders
         # Markets sharing the same negRiskMarketID are buckets in the same ladder
-        ladders: Dict[str, List[dict]] = {}  # negRiskMarketID -> [market, ...]
-        standalone: List[dict] = []  # markets without negRiskMarketID
+        ladders: Dict[str, List[GammaMarketWire]] = {}  # negRiskMarketID -> [market, ...]
+        standalone: List[GammaMarketWire] = []  # markets without negRiskMarketID
 
         for mid, item in raw_markets.items():
-            neg_risk_id = item.get("negRiskMarketID")
+            neg_risk_id = item.negRiskMarketID
             if neg_risk_id:
                 if neg_risk_id not in ladders:
                     ladders[neg_risk_id] = []
@@ -325,7 +349,7 @@ class PolymarketParser:
         for neg_risk_id, siblings in ladders.items():
             # All siblings should share city and date — use the first one
             first = siblings[0]
-            question = first.get("question", "")
+            question = first.question
             city = _match_city(question)
             if not city:
                 continue
@@ -350,16 +374,16 @@ class PolymarketParser:
                 question=question,
                 city=city,
                 market_date=market_date,
-                resolution_source=first.get("resolutionSource", ""),
+                resolution_source=first.resolutionSource,
                 active=True,
-                volume=sum(float(s.get("volume", 0) or 0) for s in siblings),
-                liquidity=sum(float(s.get("liquidity", 0) or 0) for s in siblings),
+                volume=sum(s.volume for s in siblings),
+                liquidity=sum(s.liquidity for s in siblings),
             )
 
             for sib in siblings:
                 # Parse bucket from groupItemTitle (preferred) or question
-                group_title = sib.get("groupItemTitle", "")
-                bucket_source = group_title if group_title else sib.get("question", "")
+                group_title = sib.groupItemTitle
+                bucket_source = group_title if group_title else sib.question
                 lo, hi = _parse_bucket(bucket_source)
 
                 self._parse_stats["total"] += 1
@@ -386,29 +410,12 @@ class PolymarketParser:
                     )
 
                 # Extract price — in binary markets, outcomePrices[0] is Yes price
-                outcome_prices = sib.get("outcomePrices", [])
-                if isinstance(outcome_prices, str):
-                    try:
-                        outcome_prices = json.loads(outcome_prices)
-                    except (json.JSONDecodeError, ValueError):
-                        outcome_prices = []
-
                 price_yes = 0.0
-                if outcome_prices:
-                    try:
-                        price_yes = float(outcome_prices[0])
-                    except (ValueError, IndexError):
-                        price_yes = 0.0
+                if sib.outcomePrices:
+                    price_yes = sib.outcomePrices[0]
 
                 # The "Yes" token ID for this binary market
-                clob_ids = sib.get("clobTokenIds", [])
-                if isinstance(clob_ids, str):
-                    try:
-                        clob_ids = json.loads(clob_ids)
-                    except (json.JSONDecodeError, ValueError):
-                        clob_ids = []
-
-                token_id = clob_ids[0] if clob_ids else ""
+                token_id = sib.clobTokenIds[0] if sib.clobTokenIds else ""
 
                 label = group_title if group_title else f"bucket_{lo}_{hi}"
 
@@ -428,7 +435,7 @@ class PolymarketParser:
 
         # Process standalone markets (old format or single-bucket)
         for item in standalone:
-            question = item.get("question", "")
+            question = item.question
             city = _match_city(question)
             if not city:
                 continue
@@ -437,24 +444,24 @@ class PolymarketParser:
                 continue
 
             # Detect unit from question or bucket label
-            group_title_check = item.get("groupItemTitle", "")
+            group_title_check = item.groupItemTitle
             unit = _detect_unit(question)
             if unit == "F" and group_title_check:
                 unit = _detect_unit(group_title_check)
 
             mkt = TemperatureMarket(
-                market_id=str(item.get("id", item.get("conditionId", ""))),
+                market_id=str(item.id or item.conditionId or ""),
                 question=question,
                 city=city,
                 market_date=market_date,
-                resolution_source=item.get("resolutionSource", ""),
-                active=item.get("active", True),
-                volume=float(item.get("volume", 0) or 0),
-                liquidity=float(item.get("liquidity", 0) or 0),
+                resolution_source=item.resolutionSource,
+                active=item.active,
+                volume=item.volume,
+                liquidity=item.liquidity,
             )
 
             # For standalone binary markets, parse bucket from groupItemTitle or question
-            group_title = item.get("groupItemTitle", "")
+            group_title = item.groupItemTitle
             bucket_source = group_title if group_title else question
             lo, hi = _parse_bucket(bucket_source)
 
@@ -473,21 +480,8 @@ class PolymarketParser:
                 if hi is not None:
                     hi = _celsius_to_fahrenheit(hi)
 
-            outcome_prices = item.get("outcomePrices", [])
-            if isinstance(outcome_prices, str):
-                try:
-                    outcome_prices = json.loads(outcome_prices)
-                except (json.JSONDecodeError, ValueError):
-                    outcome_prices = []
-
-            price_yes = float(outcome_prices[0]) if outcome_prices else 0.0
-            clob_ids = item.get("clobTokenIds", [])
-            if isinstance(clob_ids, str):
-                try:
-                    clob_ids = json.loads(clob_ids)
-                except (json.JSONDecodeError, ValueError):
-                    clob_ids = []
-            token_id = clob_ids[0] if clob_ids else ""
+            price_yes = item.outcomePrices[0] if item.outcomePrices else 0.0
+            token_id = item.clobTokenIds[0] if item.clobTokenIds else ""
 
             label = group_title if group_title else f"bucket_{lo}_{hi}"
             mkt.outcomes.append(MarketOutcome(

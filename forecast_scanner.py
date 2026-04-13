@@ -23,8 +23,14 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from api_models import (
+    NWSForecastResponse,
+    NWSLatestObservationResponse,
+    NWSPointsResponse,
+    validate_model,
+)
 from api_utils import fetch_with_retry
-from config import cfg
+from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +216,8 @@ class CityForecast:
 class ForecastScanner:
     """Async scanner that fetches NWS forecasts for all configured cities."""
 
-    def __init__(self):
+    def __init__(self, config: Config = cfg):
+        self.config = config
         self._grid_cache: Dict[str, Tuple[str, int, int]] = {}  # city → (office, gridX, gridY)
         self._last_forecasts: Dict[str, float] = {}  # city → last high for stability check
 
@@ -219,7 +226,7 @@ class ForecastScanner:
         if city in self._grid_cache:
             return self._grid_cache[city]
 
-        coords = cfg.nws_points.get(city)
+        coords = self.config.nws_points.get(city)
         if not coords:
             logger.warning(f"No NWS point configured for {city}")
             return None
@@ -229,15 +236,13 @@ class ForecastScanner:
         data = await fetch_with_retry(session, url, headers=NWS_HEADERS, label=f"NWS-points-{city}")
         if not data:
             return None
-        try:
-            props = data["properties"]
-            office = props["gridId"]
-            gx, gy = props["gridX"], props["gridY"]
-            self._grid_cache[city] = (office, gx, gy)
-            return (office, gx, gy)
-        except (KeyError, TypeError) as e:
-            logger.error(f"NWS points parse error for {city}: {e}")
+        parsed = validate_model(data, NWSPointsResponse, label=f"NWS-points-{city}")
+        if parsed is None:
             return None
+        office = parsed.properties.gridId
+        gx, gy = parsed.properties.gridX, parsed.properties.gridY
+        self._grid_cache[city] = (office, gx, gy)
+        return (office, gx, gy)
 
     async def _get_forecast(self, session: aiohttp.ClientSession, city: str) -> List[CityForecast]:
         """Fetch NWS gridpoint forecast and extract daily highs."""
@@ -250,23 +255,26 @@ class ForecastScanner:
         data = await fetch_with_retry(session, url, headers=NWS_HEADERS, label=f"NWS-forecast-{city}")
         if not data:
             return []
+        parsed = validate_model(data, NWSForecastResponse, label=f"NWS-forecast-{city}")
+        if parsed is None:
+            return []
 
-        periods = data.get("properties", {}).get("periods", [])
+        periods = parsed.properties.periods
         results: List[CityForecast] = []
         now = datetime.now(timezone.utc)
 
         for p in periods:
-            if not p.get("isDaytime", False):
+            if not p.isDaytime:
                 continue
-            temp = p.get("temperature")
-            unit = p.get("temperatureUnit", "F")
+            temp = p.temperature
+            unit = p.temperatureUnit
             if temp is None:
                 continue
             if unit == "C":
                 temp = temp * 9.0 / 5.0 + 32.0
 
             # Parse start time to get the forecast date
-            start_str = p.get("startTime", "")
+            start_str = p.startTime
             try:
                 start_dt = datetime.fromisoformat(start_str)
                 forecast_date = start_dt.date()
@@ -277,7 +285,7 @@ class ForecastScanner:
             sigma_base = _sigma_for_horizon(hours_out, forecast_date=forecast_date)
 
             # Weather regime detection — inflate σ for volatile patterns
-            detail_text = p.get("detailedForecast", "") or p.get("shortForecast", "")
+            detail_text = p.detailedForecast or p.shortForecast
             regime, regime_mult = _detect_weather_regime(detail_text)
             sigma = sigma_base * regime_mult
 
@@ -306,7 +314,7 @@ class ForecastScanner:
                 confidence=confidence,
                 weather_regime=regime,
                 regime_multiplier=regime_mult,
-                raw_periods=[p],
+                raw_periods=[p.model_dump()],
             ))
 
         return results
@@ -317,7 +325,7 @@ class ForecastScanner:
         Ref: §7 — NOAA pipeline, scan every 2-5 min.
         """
         async with aiohttp.ClientSession() as session:
-            tasks = [self._get_forecast(session, city) for city in cfg.cities]
+            tasks = [self._get_forecast(session, city) for city in self.config.cities]
             all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         forecasts: List[CityForecast] = []
@@ -327,7 +335,7 @@ class ForecastScanner:
                 continue
             forecasts.extend(res)
 
-        logger.info(f"Forecast scan complete: {len(forecasts)} city-date pairs across {len(cfg.cities)} cities")
+        logger.info(f"Forecast scan complete: {len(forecasts)} city-date pairs across {len(self.config.cities)} cities")
         return forecasts
 
     async def fetch_station_observation(
@@ -346,15 +354,17 @@ class ForecastScanner:
         )
         if not data:
             return None
-
-        try:
-            temp_c = data["properties"]["temperature"]["value"]
-            if temp_c is None:
-                logger.debug(f"Station {station_id}: temperature value is null")
-                return None
-            temp_f = temp_c * 9.0 / 5.0 + 32.0
-            logger.debug(f"Station {station_id}: observed {temp_f:.1f}°F ({temp_c:.1f}°C)")
-            return temp_f
-        except (KeyError, TypeError) as e:
-            logger.warning(f"Station {station_id}: failed to parse observation: {e}")
+        parsed = validate_model(
+            data,
+            NWSLatestObservationResponse,
+            label=f"NWS-station-{station_id}",
+        )
+        if parsed is None:
             return None
+        temp_c = parsed.properties.temperature.value
+        if temp_c is None:
+            logger.debug(f"Station {station_id}: temperature value is null")
+            return None
+        temp_f = temp_c * 9.0 / 5.0 + 32.0
+        logger.debug(f"Station {station_id}: observed {temp_f:.1f}°F ({temp_c:.1f}°C)")
+        return temp_f

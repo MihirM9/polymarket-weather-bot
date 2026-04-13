@@ -11,18 +11,19 @@ Ref: Gemini stress test Fix #1 (fill tracking & exposure management).
 """
 
 import asyncio
-import csv
 import logging
 import math
 import os
 import uuid
+from collections import deque
 from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import List, Optional
 
 import aiohttp
 
-from config import cfg
+from background_io import default_io_manager
+from config import cfg, Config
 from decision_engine import TradeSignal
 from dry_run_simulator import DryRunSimulator, DryRunFillTracker
 from position_tracker import OpenOrder, OrderStatus, PositionTracker
@@ -40,9 +41,11 @@ SCAN_LOG = LOG_DIR / "scans.csv"
 class TelegramAlerter:
     """Sends alerts via Telegram bot API."""
 
-    def __init__(self):
-        self.token = cfg.telegram_token
-        self.chat_id = cfg.telegram_chat_id
+    def __init__(self, config: Config = cfg):
+        self.config = config
+        self._recent_trades = deque(maxlen=20)
+        self.token = config.telegram_token
+        self.chat_id = config.telegram_chat_id
         self.enabled = bool(self.token and self.chat_id)
         if not self.enabled:
             logger.info("Telegram alerting disabled (no token/chat_id)")
@@ -88,7 +91,7 @@ class TelegramAlerter:
             f"{resolution_summary}\n"
             f"Today's orders: {trade_count}\n"
             f"{tracker.get_exposure_summary()}\n"
-            f"Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}"
+            f"Mode: {'LIVE' if self.config.is_live else 'DRY-RUN'}"
         )
         if recent_results:
             msg += f"\n\n*Recent Results:*\n{recent_results}"
@@ -132,7 +135,7 @@ class TelegramAlerter:
             f"Trades today: {total_trades_today}\n"
             f"{tracker.get_exposure_summary()}\n"
             f"{resolution_summary}\n"
-            f"Cycles: {cycle_count} | Mode: {'LIVE' if cfg.is_live else 'DRY-RUN'}"
+            f"Cycles: {cycle_count} | Mode: {'LIVE' if self.config.is_live else 'DRY-RUN'}"
         )
         await self.send(msg)
 
@@ -148,17 +151,19 @@ class TelegramAlerter:
 class TradeLogger:
     """CSV trade logger — v5: includes slippage, fill_ratio, is_maker, book_depth columns."""
 
-    def __init__(self):
-        if not TRADE_LOG.exists():
-            with open(TRADE_LOG, "w", newline="") as f:
-                csv.writer(f).writerow([
-                    "timestamp", "mode", "order_id", "city", "market_date",
-                    "outcome", "side", "p_true", "market_price", "ev", "edge",
-                    "kelly_frac", "intended_usd", "price_limit",
-                    "fill_status", "filled_usd", "avg_fill_price",
-                    "slippage", "fill_ratio", "is_maker", "book_depth",
-                    "token_id", "market_id", "rationale",
-                ])
+    TRADE_HEADER = [
+        "timestamp", "mode", "order_id", "city", "market_date",
+        "outcome", "side", "p_true", "market_price", "ev", "edge",
+        "kelly_frac", "intended_usd", "price_limit",
+        "fill_status", "filled_usd", "avg_fill_price",
+        "slippage", "fill_ratio", "is_maker", "book_depth",
+        "token_id", "market_id", "rationale",
+    ]
+    SCAN_HEADER = ["timestamp", "markets_found", "matches", "signals"]
+
+    def __init__(self, config: Config = cfg):
+        self.config = config
+        self._recent_trades = deque(maxlen=20)
 
     def log_trade(
         self,
@@ -170,9 +175,26 @@ class TradeLogger:
         is_maker: bool = False,
         book_depth: float = 0.0,
     ):
-        with open(TRADE_LOG, "a", newline="") as f:
-            csv.writer(f).writerow([
-                datetime.now(timezone.utc).isoformat(),
+        recent_trade = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "city": signal.city,
+            "date": signal.market_date.isoformat(),
+            "bucket": signal.outcome_label,
+            "side": signal.side,
+            "price": f"{signal.price_limit:.4f}",
+            "size": f"{signal.position_size_usd:.2f}",
+            "ev": f"{signal.ev:.4f}",
+            "edge": f"{signal.edge:.4f}",
+            "p_true": f"{signal.p_true:.4f}",
+            "market_price": f"{signal.market_price:.4f}",
+            "status": order.status.value,
+            "is_maker": is_maker,
+        }
+        self._recent_trades.append(recent_trade)
+        default_io_manager.append_csv(
+            TRADE_LOG,
+            [
+                recent_trade["timestamp"],
                 "dry-run" if dry_run else "live",
                 order.order_id,
                 signal.city,
@@ -196,17 +218,23 @@ class TradeLogger:
                 signal.token_id,
                 signal.market_id,
                 signal.rationale,
-            ])
+            ],
+            header=self.TRADE_HEADER,
+        )
 
     def log_scan(self, num_markets: int, num_matches: int, num_signals: int):
-        if not SCAN_LOG.exists():
-            with open(SCAN_LOG, "w", newline="") as f:
-                csv.writer(f).writerow(["timestamp", "markets_found", "matches", "signals"])
-        with open(SCAN_LOG, "a", newline="") as f:
-            csv.writer(f).writerow([
+        default_io_manager.append_csv(
+            SCAN_LOG,
+            [
                 datetime.now(timezone.utc).isoformat(),
                 num_markets, num_matches, num_signals,
-            ])
+            ],
+            header=self.SCAN_HEADER,
+        )
+
+    @property
+    def recent_trades(self) -> List[dict]:
+        return list(self._recent_trades)
 
 
 # ── Performance Tracker ─────────────────────────────────────────────
@@ -270,22 +298,23 @@ class OrderExecutor:
     # to avoid placing orders into thin books where we'd wait indefinitely.
     MIN_BOOK_DEPTH = float(os.getenv("MIN_BOOK_DEPTH", "5.0"))
 
-    def __init__(self, tracker: PositionTracker):
+    def __init__(self, tracker: PositionTracker, config: Config = cfg):
+        self.config = config
         self.client = None
-        self.dry_run = not cfg.is_live
+        self.dry_run = not config.is_live
         self.tracker = tracker
         self.simulator = DryRunSimulator()
         self.fill_tracker = DryRunFillTracker()
 
-        if cfg.is_live:
+        if config.is_live:
             try:
                 from py_clob_client.client import ClobClient
 
                 self.client = ClobClient(
-                    host=cfg.polymarket_host,
-                    key=cfg.private_key,
-                    chain_id=cfg.chain_id,
-                    funder=cfg.funder if cfg.funder else None,
+                    host=config.polymarket_host,
+                    key=config.private_key,
+                    chain_id=config.chain_id,
+                    funder=config.funder if config.funder else None,
                 )
                 self.client.set_api_creds(self.client.create_or_derive_api_creds())
                 tracker.set_clob_client(self.client)
@@ -361,13 +390,13 @@ class OrderExecutor:
                 if not bids:
                     return None
                 best_bid = max(float(b.get("price", 0)) for b in bids)
-                return min(best_bid + cfg.maker_spread_offset, signal.price_limit)
+                return min(best_bid + self.config.maker_spread_offset, signal.price_limit)
             else:
                 asks = book.get("asks", [])
                 if not asks:
                     return None
                 best_ask = min(float(a.get("price", 0)) for a in asks)
-                return max(best_ask - cfg.maker_spread_offset, signal.price_limit)
+                return max(best_ask - self.config.maker_spread_offset, signal.price_limit)
 
         except Exception as e:
             logger.debug(f"Maker price fetch failed: {e}")
@@ -539,7 +568,7 @@ class OrderExecutor:
                     book_depth=order.simulated_book_depth,
                 )
                 # Only send Telegram alerts for high-conviction trades (§ noise filter)
-                if signal.ev >= cfg.telegram_min_ev:
+                if signal.ev >= self.config.telegram_min_ev:
                     await telegram.trade_alert(signal, order, self.dry_run)
                 executed += 1
             await asyncio.sleep(0.5)

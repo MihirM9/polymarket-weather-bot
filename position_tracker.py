@@ -28,7 +28,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import cfg
+from api_models import ClobOrderStatusResponse, validate_model
+from background_io import default_io_manager
+from config import cfg, Config
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +103,14 @@ class PositionTracker:
     # 3 cycles × 2 min = 6 min cooldown prevents infinite cancel-replace loops
     COOLDOWN_CYCLES = 3
 
-    def __init__(self):
+    POSITION_HEADER = [
+        "timestamp", "order_id", "status", "city", "market_date",
+        "outcome", "side", "intended_usd", "filled_usd",
+        "filled_shares", "avg_fill_price", "age_sec",
+    ]
+
+    def __init__(self, config: Config = cfg):
+        self.config = config
         self._orders: Dict[str, OpenOrder] = {}   # order_id → OpenOrder
         self._today: Optional[date] = None
         self._daily_realized: float = 0.0
@@ -114,21 +123,12 @@ class PositionTracker:
         self._instant_fill_count: int = 0
         self._total_fills: int = 0
 
-        self._init_log()
         self._load_state()
 
-    def _init_log(self):
-        if not POSITION_LOG.exists():
-            with open(POSITION_LOG, "w", newline="") as f:
-                csv.writer(f).writerow([
-                    "timestamp", "order_id", "status", "city", "market_date",
-                    "outcome", "side", "intended_usd", "filled_usd",
-                    "filled_shares", "avg_fill_price", "age_sec",
-                ])
-
     def _log_order(self, order: OpenOrder):
-        with open(POSITION_LOG, "a", newline="") as f:
-            csv.writer(f).writerow([
+        default_io_manager.append_csv(
+            POSITION_LOG,
+            [
                 datetime.now(timezone.utc).isoformat(),
                 order.order_id,
                 order.status.value,
@@ -141,7 +141,9 @@ class PositionTracker:
                 f"{order.filled_shares:.4f}",
                 f"{order.avg_fill_price:.4f}",
                 f"{order.age_seconds:.0f}",
-            ])
+            ],
+            header=self.POSITION_HEADER,
+        )
 
     def _save_state(self):
         """Persist all orders to disk so positions survive bot restarts."""
@@ -178,10 +180,7 @@ class PositionTracker:
                     for oid, o in self._orders.items()
                 },
             }
-            tmp = str(TRACKER_STATE_FILE) + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, TRACKER_STATE_FILE)
+            default_io_manager.write_json_atomic(TRACKER_STATE_FILE, data, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save tracker state: {e}")
 
@@ -474,19 +473,29 @@ class PositionTracker:
 
             try:
                 # Query CLOB for order status
-                resp = self._clob_client.get_order(order_id)
-                if not resp:
+                raw_resp = self._clob_client.get_order(order_id)
+                if not raw_resp:
+                    continue
+                parsed_resp = validate_model(
+                    raw_resp,
+                    ClobOrderStatusResponse,
+                    label=f"CLOB-order-{order_id}",
+                )
+                if parsed_resp is None:
                     continue
 
                 order.last_checked = now
 
                 # Parse fill data from response
                 # py-clob-client returns: status, size_matched, price, etc.
-                clob_status = resp.get("status", "").lower()
-                size_matched = float(resp.get("size_matched", 0) or 0)
-                original_size = float(resp.get("original_size", 0) or 0)
-                avg_price = float(resp.get("associate_trades_avg_price",
-                                  resp.get("price", order.limit_price)) or order.limit_price)
+                clob_status = parsed_resp.status.lower()
+                size_matched = parsed_resp.size_matched or 0.0
+                original_size = parsed_resp.original_size or 0.0
+                avg_price = (
+                    parsed_resp.associate_trades_avg_price
+                    or parsed_resp.price
+                    or order.limit_price
+                )
 
                 prev_filled = order.filled_size_usd
                 order.filled_shares = size_matched

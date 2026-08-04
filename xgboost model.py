@@ -14,12 +14,7 @@ def engineer_residual_features(
     model_registry: dict,
     target_station: str
 ) -> tuple:
-    """
-    Engineers non-linear, heteroskedastic, and spatial features
-    from AR residuals.
-    """
 
-    # Fetch station residuals and optimal AR order
     target_res = model_registry[target_station]["residuals"]
     p_lags = model_registry[target_station]["optimal_lag_p"]
 
@@ -27,10 +22,6 @@ def engineer_residual_features(
         "target_res": target_res
     })
 
-    # ---------------------------------------------------------
-    # Feature Set A : Lagged Residual Dynamics
-    # Use the same lag order selected by the AR(p) model.
-    # ---------------------------------------------------------
     for lag in range(1, p_lags + 1):
 
         df_features[f"target_res_lag_{lag}"] = (
@@ -41,9 +32,6 @@ def engineer_residual_features(
             df_features[f"target_res_lag_{lag}"]
         )
 
-    # ---------------------------------------------------------
-    # Feature Set B : Rolling Volatility
-    # ---------------------------------------------------------
     df_features["rolling_vol_3d"] = (
         df_features["target_res"]
         .shift(1)
@@ -58,9 +46,6 @@ def engineer_residual_features(
         .std()
     )
 
-    # ---------------------------------------------------------
-    # Feature Set C : Spatial Cross-Station Features
-    # ---------------------------------------------------------
     for other_station, data in model_registry.items():
 
         if other_station != target_station:
@@ -71,7 +56,6 @@ def engineer_residual_features(
                 f"spatial_res_{other_station}_lag_1"
             ] = pd.Series(other_res).shift(1).values
 
-    # Remove rows with NaNs introduced by shifting
     df_features.dropna(inplace=True)
 
     X = df_features.drop(columns=["target_res"])
@@ -121,7 +105,6 @@ def train_xgb_residual_model(
     fold_rmse = []
     fold_residuals = []
 
-    # Walk chronologically through the folds
     for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
 
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
@@ -144,7 +127,6 @@ def train_xgb_residual_model(
 
         preds = xgb_model.predict(X_val)
 
-        # Store validation residuals for Monte Carlo
         fold_residuals.extend(y_val - preds)
 
         rmse = np.sqrt(
@@ -164,10 +146,8 @@ def train_xgb_residual_model(
         f"Mean Time-Series CV RMSE: {np.mean(fold_rmse):.4f}"
     )
 
-    # Remaining unexplained variance after XGBoost
     xgb_residual_std = np.std(fold_residuals)
 
-    # Train final production model
     xgb_model.fit(
         X,
         y,

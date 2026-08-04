@@ -69,36 +69,15 @@ def train_xgb_residual_model(
     y: np.ndarray,
     n_splits: int = 5
 ) -> tuple:
-    """
-    Trains XGBoost using TimeSeriesSplit to prevent look-ahead
-    data leakage.
-
-    Returns
-    -------
-    xgb_model
-        Final production model trained on all data.
-
-    xgb_residual_std
-        Standard deviation of out-of-sample residuals,
-        used during Monte Carlo simulation.
-    """
-
+    
     tscv = TimeSeriesSplit(n_splits=n_splits)
-
     xgb_model = xgb.XGBRegressor(
-
         n_estimators=150,
-
         max_depth=4,
-
         learning_rate=0.03,
-
         subsample=0.8,
-
         colsample_bytree=0.8,
-
         random_state=42,
-
         n_jobs=-1
     )
 
@@ -113,15 +92,10 @@ def train_xgb_residual_model(
         y_val = y[val_idx]
 
         xgb_model.fit(
-
             X_train,
-
             y_train,
-
             eval_set=[(X_val, y_val)],
-
             early_stopping_rounds=20,
-
             verbose=False
         )
 

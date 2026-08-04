@@ -1,5 +1,5 @@
 # Polymarket Weather Trading Bot v5
-
+CONTRIBUTORS: Atheerath Naineni, Mihir Madhunapantula
 Autonomous Python trading bot for Polymarket US city daily high-temperature bucket markets. Trades on Polygon (chain_id=137) via py-clob-client. Exploits systematic mispricing between NOAA/NWS forecast accuracy (~90% at 5-day, 1-2F short-term) and retail market pricing.
 
 ## How It Works

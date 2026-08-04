@@ -16,22 +16,13 @@ def simulate_hybrid_paths(
 ) -> np.ndarray:
     """
     Hybrid Monte Carlo simulator.
+    Forecasts future temperature anomalies using:
+    AR(p) linear dynamics
+    XGBoost residual correction
+    Gaussian innovation noise
 
-    Forecasts future temperature anomalies using
-
-        • AR(p) linear dynamics
-        • XGBoost residual correction
-        • Gaussian innovation noise
-
-    Returns
-    -------
-    simulated_anomalies : np.ndarray
-        Shape = (n_paths, forecast_horizon)
     """
 
-    # -------------------------------------------------
-    # Load station-specific model parameters
-    # -------------------------------------------------
     ar_coefs = np.asarray(
         model_registry[station_id]["ar_coefs"],
         dtype=np.float32
@@ -46,7 +37,6 @@ def simulate_hybrid_paths(
 
     for path in range(n_paths):
 
-        # Fixed-length rolling buffers
         anomaly_buffer = deque(
             recent_anomalies[-p_lags:],
             maxlen=p_lags
@@ -59,20 +49,15 @@ def simulate_hybrid_paths(
 
         for day in range(forecast_horizon):
 
-            # -------------------------------------------------
-            # 1. Linear AR prediction
-            # -------------------------------------------------
+            # AR
             ar_prediction = np.dot(
                 ar_coefs,
                 np.array(anomaly_buffer, dtype=np.float32)[::-1]
             )
 
-            # -------------------------------------------------
-            # 2. Reconstruct XGBoost feature vector
-            # -------------------------------------------------
             feature_dict = {}
 
-            # Dynamic residual lag features
+            # Residual lags
             for lag in range(1, p_lags + 1):
 
                 feature_dict[f"target_res_lag_{lag}"] = (
@@ -83,7 +68,7 @@ def simulate_hybrid_paths(
                     residual_buffer[-lag]
                 )
 
-            # Rolling volatility features
+            # Volatility
             feature_dict["rolling_vol_3d"] = np.std(
                 list(residual_buffer)[-3:]
             )
@@ -92,7 +77,6 @@ def simulate_hybrid_paths(
                 list(residual_buffer)[-7:]
             )
 
-            # Preserve training feature schema
             for feature in feature_names:
                 feature_dict.setdefault(feature, 0.0)
 
@@ -101,14 +85,8 @@ def simulate_hybrid_paths(
                 columns=feature_names
             )
 
-            # -------------------------------------------------
-            # 3. Predict nonlinear residual
-            # -------------------------------------------------
             predicted_residual = xgb_model.predict(X_step)[0]
 
-            # -------------------------------------------------
-            # 4. Sample remaining innovation
-            # -------------------------------------------------
             innovation = np.random.normal(
                 loc=0.0,
                 scale=xgb_residual_std
@@ -119,9 +97,6 @@ def simulate_hybrid_paths(
                 innovation
             )
 
-            # -------------------------------------------------
-            # 5. Hybrid anomaly forecast
-            # -------------------------------------------------
             next_anomaly = (
                 ar_prediction +
                 total_residual
@@ -129,9 +104,7 @@ def simulate_hybrid_paths(
 
             simulated_anomalies[path, day] = next_anomaly
 
-            # -------------------------------------------------
-            # 6. Roll buffers forward
-            # -------------------------------------------------
+            # Roll
             anomaly_buffer.append(next_anomaly)
             residual_buffer.append(total_residual)
 

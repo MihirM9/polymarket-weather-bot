@@ -7,23 +7,23 @@ Uses pydantic to reduce silent failures when upstream API payloads drift.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional, Self, TypeVar
+from typing import Any, Optional, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 ModelT = TypeVar("ModelT", bound="APIModel")
 
 
 class APIModel(BaseModel):
-    class Config:
-        extra = "ignore"
+    """Base for external-API response models.
 
-    @classmethod
-    def model_validate(cls, data: Any) -> Self:
-        return cls.parse_obj(data)
+    Pydantic v2 already provides ``model_validate`` / ``model_dump``. Do not
+    reintroduce ``parse_obj``/``dict`` wrappers here: in v2 those are themselves
+    implemented in terms of the v2 methods, so overriding one to call the other
+    recurses until the stack blows.
+    """
 
-    def model_dump(self) -> dict[str, Any]:
-        return self.dict()
+    model_config = ConfigDict(extra="ignore")
 
 
 class NWSPointProperties(APIModel):
@@ -79,14 +79,14 @@ class GammaMarketWire(APIModel):
     outcomePrices: list[float] = Field(default_factory=list)
     clobTokenIds: list[str] = Field(default_factory=list)
 
-    @validator("volume", "liquidity", pre=True)
+    @field_validator("volume", "liquidity", mode="before")
     @classmethod
     def _coerce_float(cls, value: Any) -> float:
         if value in (None, ""):
             return 0.0
         return float(value)
 
-    @validator("outcomePrices", pre=True)
+    @field_validator("outcomePrices", mode="before")
     @classmethod
     def _parse_outcome_prices(cls, value: Any) -> list[float]:
         if value in (None, ""):
@@ -100,7 +100,7 @@ class GammaMarketWire(APIModel):
             raise ValueError("outcomePrices must be a list")
         return [float(item) for item in value]
 
-    @validator("clobTokenIds", pre=True)
+    @field_validator("clobTokenIds", mode="before")
     @classmethod
     def _parse_clob_ids(cls, value: Any) -> list[str]:
         if value in (None, ""):
@@ -122,7 +122,7 @@ class ClobOrderStatusResponse(APIModel):
     associate_trades_avg_price: Optional[float] = None
     price: Optional[float] = None
 
-    @validator("size_matched", "original_size", "associate_trades_avg_price", "price", pre=True)
+    @field_validator("size_matched", "original_size", "associate_trades_avg_price", "price", mode="before")
     @classmethod
     def _parse_optional_float(cls, value: Any) -> Optional[float]:
         if value in (None, ""):
